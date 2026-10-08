@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "tollgate": {
+      "command": "uv",
+      "args": ["run", "tollgate", "--upstreams", "examples/upstreams.json"]
+    }
+  }
+}

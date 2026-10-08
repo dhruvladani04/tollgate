@@ -1,0 +1,2 @@
+Hello from the Tollgate sandbox.
+The filesystem upstream in examples/upstreams.json can read and write only this folder.

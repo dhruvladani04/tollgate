@@ -51,9 +51,30 @@ uv run pytest                         run the tests (no network, no key needed)
 uv run ruff check .                   lint
 uv run ruff format .                  format
 uv run --env-file .env python scripts/smoke_jev.py    one live Jev call
+uv run tollgate --upstreams examples/upstreams.json   run the proxy over stdio
 ```
 
-`.env` sets `TOLLGATE_JEV_ROUTE` and the key for that route.
+`.env` sets `TOLLGATE_JEV_ROUTE` and the key for that route. A few tests start real
+server processes, so the full run takes about 20 seconds.
+
+## The proxy
+
+- **The `mcp` SDK is version 2.** Its API differs from version 1: the low-level `Server`
+  takes `on_list_tools` and `on_call_tool` handlers, `mcp.Client` replaces hand-built
+  sessions, and `FastMCP` is now `MCPServer`. Read the installed source under
+  `.venv/Lib/site-packages/mcp` instead of relying on memory.
+- **One path for every call.** `ToolRouter` in `proxy/intercept.py` is the only route from
+  the client to an upstream. Gating belongs there.
+- **Tool names are unchanged.** If two upstreams offer the same name, Tollgate refuses to
+  start rather than guess.
+- **Upstream environment.** A stdio upstream inherits Tollgate's environment minus
+  Tollgate's own API keys (`_WITHHELD` in `proxy/upstreams.py`, built from the Jev routes).
+  When a milestone adds another key, such as the LLM judge's, add its variable there.
+- **Errors cross client blocks in groups.** An exception raised inside `async with
+  Client(...)` reaches the outside wrapped in an `ExceptionGroup`. Catch it inside the
+  block, or unwrap it with `leaf_exceptions`.
+- **stdout is the protocol.** Log to stderr only.
+- **Only tools are forwarded so far.** Resources, prompts and upstream notifications are not.
 
 ## Layout
 
@@ -70,11 +91,15 @@ src/tollgate/
 evals/                golden data, runner, tuning, report (M4)
 scripts/              developer scripts, such as the Jev smoke test
 tests/
-examples/             demo client configs (M1, M6)
+examples/             upstreams file, Claude Code config, sandbox folder (M1); demos (M6)
 ```
 
 ## Milestone status
 
 - **M0 Scaffold:** done. The live smoke call was answered by `jev-1.13.0` on the
   `typesafe` route on 8 Oct 2026.
-- M1 to M6: not started.
+- **M1 Passthrough proxy:** done. Through Tollgate, an MCP SDK client sees the same 15
+  tools and the same results as it sees from the real filesystem and fetch servers
+  directly. On 8 Oct 2026 Claude Code, pointed at Tollgate, called `read_text_file` on
+  the filesystem upstream and `fetch` (raw mode) on the fetch upstream.
+- M2 to M6: not started.
