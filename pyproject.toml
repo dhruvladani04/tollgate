@@ -1,0 +1,33 @@
+[project]
+name = "tollgate"
+version = "0.1.0"
+description = "MCP proxy that gates tool calls and scans tool results with TypeSafe's Jev model"
+readme = "README.md"
+authors = [
+    { name = "Dhruv Ladani", email = "dhruvladanicode04@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "typesafe-sdk>=0.7.2",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.28,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "ruff>=0.16.10",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["scripts"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
