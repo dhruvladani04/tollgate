@@ -1,36 +1,9 @@
 import asyncio
 
 import pytest
-from mcp import types
+from fakes import FakeUpstream, call, text_result
 
 from tollgate.proxy.intercept import ToolNameCollision, ToolRouter, UnknownTool
-
-
-def tool(name: str) -> types.Tool:
-    return types.Tool(name=name, input_schema={"type": "object"})
-
-
-def text_result(text: str) -> types.CallToolResult:
-    return types.CallToolResult(content=[types.TextContent(type="text", text=text)])
-
-
-class FakeUpstream:
-    def __init__(self, *tool_names: str) -> None:
-        self.tool_names = list(tool_names)
-        self.calls: list[types.CallToolRequestParams] = []
-        self.listings = 0
-
-    async def list_tools(self) -> list[types.Tool]:
-        self.listings += 1
-        return [tool(name) for name in self.tool_names]
-
-    async def call_tool(self, params: types.CallToolRequestParams) -> types.CallToolResult:
-        self.calls.append(params)
-        return text_result(f"{params.name} ran")
-
-
-def call(name: str, **arguments) -> types.CallToolRequestParams:
-    return types.CallToolRequestParams(name=name, arguments=arguments)
 
 
 def test_tools_from_every_upstream_are_listed_in_upstream_order():

@@ -51,11 +51,14 @@ uv run pytest                         run the tests (no network, no key needed)
 uv run ruff check .                   lint
 uv run ruff format .                  format
 uv run --env-file .env python scripts/smoke_jev.py    one live Jev call
-uv run tollgate --upstreams examples/upstreams.json   run the proxy over stdio
+uv run --env-file .env python scripts/observe_demo.py         M2 demo: calls plus audit log
+uv run --env-file .env python scripts/measure_jev_latency.py  p50 and p95 of Jev from here
+uv run python -m tollgate.audit                       print the latest audit records
+uv run --env-file .env tollgate --upstreams examples/upstreams.json --mode observe
 ```
 
 `.env` sets `TOLLGATE_JEV_ROUTE` and the key for that route. A few tests start real
-server processes, so the full run takes about 20 seconds.
+server processes, so the full run takes about 45 seconds.
 
 ## The proxy
 
@@ -75,6 +78,34 @@ server processes, so the full run takes about 20 seconds.
   block, or unwrap it with `leaf_exceptions`.
 - **stdout is the protocol.** Log to stderr only.
 - **Only tools are forwarded so far.** Resources, prompts and upstream notifications are not.
+- **Modes.** `--mode passthrough` forwards only. `--mode observe` asks Jev about every
+  call, writes an audit row, and forwards the call whatever the answer. `--mode enforce`
+  is the default and exits with a message until M3 builds it.
+
+## The decision layer
+
+- **One interface.** `DecisionModel` in `decide/base.py` takes a `DecisionRequest`, which
+  is a System One request: a `state` plus named questions as plain wire-shape dicts. Any
+  backend that answers that shape can stand behind the gate, which is how the LLM judge
+  arrives in M5.
+- **Questions.** `decide/questions.py` holds the spec's wording. Jev judges each Score
+  level on its own, without seeing the other levels, so each level describes a whole
+  situation. Read the Jev docs (Score, Noul, jaggedness) before rewording anything.
+- **The user's request is not in MCP.** A tool call carries a tool name and arguments,
+  nothing about the conversation. A client that knows the user's request sends it in the
+  call's `_meta` (keys in `decide/questions.py`). Without it, only `risk` and
+  `destructive` are asked, because `on_task` and `exfiltration` need `user_request`.
+  Claude Code sends no such context.
+- **Arguments go to Jev whole.** Size limits belong to the M3 policy and pre-filter.
+- **Cache.** `decide/cache.py` keys on the exact request and stores JSON lines, so an
+  evaluation can commit its cache. Jev's answers to the same request vary by a few
+  hundredths between calls; a cached answer does not.
+- **Audit.** `audit/store.py` writes one SQLite row per call. It uses SQLite's default
+  journal mode. With write-ahead logging, opening the file while Tollgate was shutting
+  down failed once on Windows with a disk I/O error; the cause was not confirmed, so
+  test on Windows before turning it back on.
+- **Observe mode blocks nothing.** A model failure or an audit failure is recorded or
+  logged, and the call is still forwarded.
 
 ## Layout
 
@@ -83,7 +114,7 @@ docs/spec.md          the build plan
 docs/decisions/       short ADRs
 src/tollgate/
   proxy/              MCP server face and upstream sessions (M1)
-  decide/             DecisionModel protocol, Jev and LLM backends (M2, M5)
+  decide/             DecisionModel protocol, questions, cache, Jev backend (M2); LLM (M5)
   policy/             YAML schema, pre-filter, band engine (M3)
   approve/            approval queue and CLI (M3)
   audit/              SQLite audit log (M2)
@@ -94,6 +125,23 @@ tests/
 examples/             upstreams file, Claude Code config, sandbox folder (M1); demos (M6)
 ```
 
+## Decided with the user
+
+- **Claude Code hook, after M3 (decided 9 Oct 2026).** Once M3's core is done, add a
+  `UserPromptSubmit` hook that hands each prompt to Tollgate as `user_request`. It is
+  its own small step, not part of M3. Limits to handle when building it: the latest
+  prompt is often not the task (send the last two prompts as context), prompts can only
+  be matched to a session by project folder, and a stale prompt needs a freshness rule.
+- **M3 must work without a user request.** Generic clients never send one, so the policy
+  needs defined behaviour when `on_task` and `exfiltration` were not asked.
+
+Proposed by Claude and not yet confirmed by the user:
+
+- In M3, a call that matches no band (for example risk above 2.2 that is on task) goes
+  to Ask.
+- In M4, measure every configuration with and without the user request, to publish how
+  much knowing the request adds.
+
 ## Milestone status
 
 - **M0 Scaffold:** done. The live smoke call was answered by `jev-1.13.0` on the
@@ -102,4 +150,9 @@ examples/             upstreams file, Claude Code config, sandbox folder (M1); d
   tools and the same results as it sees from the real filesystem and fetch servers
   directly. On 8 Oct 2026 Claude Code, pointed at Tollgate, called `read_text_file` on
   the filesystem upstream and `fetch` (raw mode) on the fetch upstream.
-- M2 to M6: not started.
+- **M2 Decision layer and audit:** built. In observe mode against the real upstreams and
+  `jev-1.13.0`, five demo calls wrote five audit rows and none was blocked (9 Oct 2026).
+  Jev latency from this machine over 30 warm calls: median 328 ms, p95 556 ms, slowest
+  587 ms; a first call on a new connection took 488 ms. A four-question request used
+  518 input tokens on average.
+- M3 to M6: not started.

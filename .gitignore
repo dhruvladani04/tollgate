@@ -16,3 +16,6 @@ wheels/
 # Keys stay in the environment, never in files
 .env
 .env.*
+
+# Tollgate state: the audit log and the decision cache
+.tollgate/

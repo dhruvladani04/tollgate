@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import socket
 import subprocess
 import sys
@@ -14,7 +15,8 @@ import pytest
 from mcp import Client, StdioServerParameters
 
 FAKE = str(Path(__file__).with_name("fake_upstream.py"))
-TOLLGATE = [sys.executable, "-m", "tollgate.proxy.server"]
+SERVER = [sys.executable, "-m", "tollgate.proxy.server"]
+TOLLGATE = [*SERVER, "--mode", "passthrough"]
 TIMEOUT_SECONDS = 60
 
 
@@ -149,3 +151,36 @@ def test_startup_stops_on_an_unreadable_upstreams_file(tmp_path):
 
     assert finished.returncode == 1
     assert "tollgate: cannot read" in finished.stderr
+
+
+def run_in_mode(config: Path, *mode: str) -> subprocess.CompletedProcess[str]:
+    """Run Tollgate in a given mode, with no Jev key in its environment."""
+    keys = ("TYPESAFE_API_KEY", "OPENROUTER_API_KEY", "TOLLGATE_JEV_ROUTE")
+    env = {name: value for name, value in os.environ.items() if name not in keys}
+    return subprocess.run(
+        [*SERVER, "--upstreams", str(config), *mode],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=TIMEOUT_SECONDS,
+        env=env,
+    )
+
+
+def test_observe_mode_without_a_key_stops_before_starting_any_upstream(tmp_path):
+    config = write_config(tmp_path, {"ghost": {"command": "tollgate-no-such-command"}})
+
+    finished = run_in_mode(config, "--mode", "observe")
+
+    assert finished.returncode == 1
+    assert "tollgate: TYPESAFE_API_KEY is not set" in finished.stderr
+    assert "ghost" not in finished.stderr
+
+
+def test_the_default_mode_refuses_to_run_until_enforcement_exists(tmp_path):
+    config = write_config(tmp_path, {"text": stdio_upstream("text")})
+
+    finished = run_in_mode(config)
+
+    assert finished.returncode == 1
+    assert "enforce mode is not built yet" in finished.stderr

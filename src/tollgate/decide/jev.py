@@ -10,7 +10,17 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+import typesafe_sdk as sdk
 from typesafe_sdk import AsyncTypeSafeClient
+
+from tollgate.decide.base import (
+    Answer,
+    Decision,
+    DecisionError,
+    DecisionRequest,
+    NoulAnswer,
+    ScoreAnswer,
+)
 
 ROUTE_ENV = "TOLLGATE_JEV_ROUTE"
 DEFAULT_ROUTE = "typesafe"
@@ -81,3 +91,52 @@ def make_client(
         model=route.model,
         **client_options,
     )
+
+
+class JevDecisionModel:
+    """Asks Jev, through an SDK client the caller opens and closes."""
+
+    backend = "jev"
+
+    def __init__(self, client: AsyncTypeSafeClient, model: str) -> None:
+        self._client = client
+        self.model = model
+
+    async def decide(self, request: DecisionRequest) -> Decision:
+        try:
+            response = await self._client.system_one(
+                dict(request.state), dict(request.questions), model=self.model
+            )
+        except sdk.TypeSafeAPITimeoutError as error:
+            raise DecisionError("timeout", str(error)) from error
+        except sdk.TypeSafeAPIConnectionError as error:
+            raise DecisionError("unreachable", str(error)) from error
+        except sdk.TypeSafeRateLimitError as error:
+            raise DecisionError("rate_limited", str(error)) from error
+        except sdk.TypeSafeError as error:
+            raise DecisionError("failed", str(error)) from error
+
+        unanswered = sorted(set(request.questions) - set(response.answers))
+        if unanswered:
+            raise DecisionError("failed", f"Jev did not answer: {', '.join(unanswered)}")
+        return Decision(
+            answers={name: _answer(response.answers[name]) for name in request.questions},
+            model=response.model,
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+        )
+
+
+def _answer(answer: sdk.Answer) -> Answer:
+    match answer:
+        case sdk.NoulAnswer():
+            return NoulAnswer(probability=answer.noul)
+        case sdk.ScoreAnswer():
+            levels = sorted(answer.probabilities)
+            return ScoreAnswer(
+                score=answer.score,
+                probabilities=tuple(answer.probabilities[level] for level in levels),
+                confidence=answer.confidence,
+            )
+        case _:
+            raise DecisionError("failed", f"Jev returned an unsupported {answer.type} answer")
