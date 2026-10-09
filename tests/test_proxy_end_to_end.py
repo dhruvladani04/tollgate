@@ -12,12 +12,17 @@ from pathlib import Path
 
 import fake_upstream
 import pytest
+import yaml
 from mcp import Client, StdioServerParameters
+
+from tollgate.approve.queue import APPROVALS_FILE, ApprovalQueue
+from tollgate.audit.store import AuditStore
 
 FAKE = str(Path(__file__).with_name("fake_upstream.py"))
 SERVER = [sys.executable, "-m", "tollgate.proxy.server"]
 TOLLGATE = [*SERVER, "--mode", "passthrough"]
 TIMEOUT_SECONDS = 60
+EXAMPLE_POLICY = Path(__file__).resolve().parents[1] / "policy.example.yaml"
 
 
 def stdio_upstream(flavor: str) -> dict:
@@ -153,12 +158,12 @@ def test_startup_stops_on_an_unreadable_upstreams_file(tmp_path):
     assert "tollgate: cannot read" in finished.stderr
 
 
-def run_in_mode(config: Path, *mode: str) -> subprocess.CompletedProcess[str]:
-    """Run Tollgate in a given mode, with no Jev key in its environment."""
+def run_in_mode(config: Path, *options: str) -> subprocess.CompletedProcess[str]:
+    """Run Tollgate with the given options and no Jev key in its environment."""
     keys = ("TYPESAFE_API_KEY", "OPENROUTER_API_KEY", "TOLLGATE_JEV_ROUTE")
     env = {name: value for name, value in os.environ.items() if name not in keys}
     return subprocess.run(
-        [*SERVER, "--upstreams", str(config), *mode],
+        [*SERVER, "--upstreams", str(config), *options],
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
@@ -167,20 +172,98 @@ def run_in_mode(config: Path, *mode: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_observe_mode_without_a_key_stops_before_starting_any_upstream(tmp_path):
+@pytest.mark.parametrize("mode", [["--mode", "observe"], ["--mode", "enforce"], []])
+def test_a_gating_mode_without_a_key_stops_before_starting_any_upstream(tmp_path, mode):
     config = write_config(tmp_path, {"ghost": {"command": "tollgate-no-such-command"}})
 
-    finished = run_in_mode(config, "--mode", "observe")
+    finished = run_in_mode(config, *mode, "--policy", str(EXAMPLE_POLICY))
 
     assert finished.returncode == 1
     assert "tollgate: TYPESAFE_API_KEY is not set" in finished.stderr
     assert "ghost" not in finished.stderr
 
 
-def test_the_default_mode_refuses_to_run_until_enforcement_exists(tmp_path):
+def test_a_gating_mode_without_a_policy_file_says_so(tmp_path):
     config = write_config(tmp_path, {"text": stdio_upstream("text")})
 
-    finished = run_in_mode(config)
+    finished = run_in_mode(config, "--policy", str(tmp_path / "absent.yaml"))
 
     assert finished.returncode == 1
-    assert "enforce mode is not built yet" in finished.stderr
+    assert "tollgate: cannot read the policy file" in finished.stderr
+
+
+def test_enforce_mode_holds_a_call_it_cannot_judge_until_the_approval_command_approves_it(
+    tmp_path,
+):
+    """The whole loop in real processes: client, Tollgate, upstream and approval command.
+
+    The policy gives the model one millisecond, so every decision times out, as in an outage.
+    """
+    rules = yaml.safe_load(EXAMPLE_POLICY.read_text(encoding="utf-8"))
+    rules["decision"]["timeout_ms"] = 1
+    rules["prefilter"] |= {"allow_tools": [], "deny_tools": ["fail"]}
+    rules["prefilter"]["path_sandbox"]["roots"] = []
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text(yaml.safe_dump(rules), encoding="utf-8")
+    config = write_config(tmp_path, {"text": stdio_upstream("text")})
+    state = tmp_path / "state"
+    tollgate = StdioServerParameters(
+        command=SERVER[0],
+        args=[
+            *SERVER[1:],
+            "--upstreams",
+            str(config),
+            "--policy",
+            str(policy_file),
+            "--state-dir",
+            str(state),
+        ],
+        env={"TYPESAFE_API_KEY": "not-a-real-key"},
+    )
+
+    async def scenario():
+        async with Client(tollgate, cache=None) as client:
+            blocked = await client.call_tool("fail", {"reason": "never runs"})
+            calling = asyncio.create_task(client.call_tool("echo", {"text": "hello"}))
+            with ApprovalQueue(state / APPROVALS_FILE) as queue:
+                while not queue.pending():
+                    assert not calling.done(), "the call finished without being held"
+                    await asyncio.sleep(0.05)
+                [held] = queue.pending()
+            await asyncio.sleep(0.3)
+            still_held = not calling.done()
+            approved = await asyncio.to_thread(
+                subprocess.run,
+                [
+                    sys.executable,
+                    "-m",
+                    "tollgate.approve.cli",
+                    "--state-dir",
+                    str(state),
+                    "approve",
+                    str(held.id),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=TIMEOUT_SECONDS,
+            )
+            return blocked, held, still_held, approved, await calling
+
+    blocked, held, still_held, approved, result = asyncio.run(
+        asyncio.wait_for(scenario(), TIMEOUT_SECONDS)
+    )
+
+    assert blocked.is_error
+    assert "deny list" in blocked.content[0].text
+    assert held.tool == "echo"
+    assert any("no decision from the model" in reason for reason in held.reasons)
+    assert still_held
+    assert approved.returncode == 0
+    assert f"approved #{held.id} (echo)" in approved.stdout
+    assert not result.is_error
+    assert result.content[0].text == "hello"
+    with AuditStore(state / "audit.sqlite") as audit:
+        judged, refused = audit.recent(10)
+    assert (refused.tool, refused.band, refused.action) == ("fail", "block", "blocked")
+    assert (judged.tool, judged.band, judged.action) == ("echo", "ask", "forwarded")
+    assert judged.error.startswith("timeout")

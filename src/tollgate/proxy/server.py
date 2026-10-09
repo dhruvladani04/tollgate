@@ -6,6 +6,7 @@ import logging
 import sys
 from collections.abc import Mapping
 from contextlib import AsyncExitStack
+from dataclasses import dataclass
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
@@ -13,8 +14,9 @@ from typing import Any
 from mcp import MCPError, types
 from mcp.server import Server, ServerRequestContext
 from mcp.server.stdio import stdio_server
-from typesafe_sdk import TypeSafeError
+from typesafe_sdk import RetryPolicy, TypeSafeError
 
+from tollgate.approve.queue import APPROVALS_FILE, ApprovalQueue
 from tollgate.audit.store import AuditStore
 from tollgate.decide.cache import CachedDecisionModel, DecisionCache
 from tollgate.decide.jev import (
@@ -25,8 +27,9 @@ from tollgate.decide.jev import (
     read_api_key,
     resolve_route,
 )
+from tollgate.policy.schema import Policy, PolicyError, load_policy
 from tollgate.proxy.intercept import (
-    DecisionObserver,
+    Gate,
     RoutingError,
     ToolNameCollision,
     ToolRouter,
@@ -45,6 +48,15 @@ logger = logging.getLogger("tollgate")
 
 AUDIT_FILE = "audit.sqlite"
 CACHE_FILE = "jev-cache.jsonl"
+
+
+@dataclass(frozen=True)
+class Gating:
+    """What the gate needs beyond the upstreams. Absent in passthrough mode."""
+
+    route: JevRoute
+    policy: Policy
+    enforce: bool
 
 
 def build_server(source: ToolSource) -> Server[Any]:
@@ -73,24 +85,39 @@ def build_server(source: ToolSource) -> Server[Any]:
 
 
 async def serve(
-    configs: Mapping[str, UpstreamConfig], route: JevRoute | None, state_dir: Path
+    configs: Mapping[str, UpstreamConfig], gating: Gating | None, state_dir: Path
 ) -> None:
     """Connect to every upstream, then serve one client over stdin and stdout.
 
-    With a Jev route, every call is put to Jev and recorded before it is
-    forwarded. Without one, calls are forwarded and nothing is recorded.
+    With `gating`, every call is judged and recorded, and in enforce mode acted
+    on. Without it, calls are forwarded and nothing is recorded.
     """
     async with AsyncExitStack() as stack:
-        observed_with = None
-        if route is not None:
+        gate_parts = None
+        if gating is not None:
             # Opened before the upstreams, so that a bad key is reported plainly
             # and no upstream is started for nothing.
-            client = await stack.enter_async_context(make_client(route))
-            audit = stack.enter_context(AuditStore(state_dir / AUDIT_FILE))
-            model = CachedDecisionModel(
-                JevDecisionModel(client, route.model), DecisionCache(state_dir / CACHE_FILE)
+            budget = gating.policy.decision.timeout_ms / 1000
+            client = await stack.enter_async_context(
+                make_client(
+                    gating.route,
+                    timeout=budget,
+                    retry=RetryPolicy(
+                        max_retries=gating.policy.decision.max_retries, timeout=budget
+                    ),
+                )
             )
-            observed_with = (model, audit)
+            audit = stack.enter_context(AuditStore(state_dir / AUDIT_FILE))
+            approvals = (
+                stack.enter_context(ApprovalQueue(state_dir / APPROVALS_FILE))
+                if gating.enforce
+                else None
+            )
+            model = CachedDecisionModel(
+                JevDecisionModel(client, gating.route.model),
+                DecisionCache(state_dir / CACHE_FILE),
+            )
+            gate_parts = (model, audit, gating.policy, approvals)
 
         upstreams = await stack.enter_async_context(connect_upstreams(configs))
         router = ToolRouter(upstreams)
@@ -103,15 +130,19 @@ async def serve(
         )
 
         source: ToolSource = router
-        if observed_with is None:
+        if gating is None or gate_parts is None:
             logger.info("passthrough mode: no decisions are made and nothing is recorded")
         else:
-            source = DecisionObserver(router, *observed_with)
+            source = Gate(router, *gate_parts, enforce=gating.enforce)
             logger.info(
-                "observe mode: asking %s over the %s route, recording to %s, blocking nothing",
-                route.model,
-                route.name,
+                "%s mode: asking %s over the %s route, recording to %s. %s",
+                "enforce" if gating.enforce else "observe",
+                gating.route.model,
+                gating.route.name,
                 state_dir / AUDIT_FILE,
+                "Held calls wait for `tollgate-approve`."
+                if gating.enforce
+                else "Nothing is blocked.",
             )
 
         server = build_server(source)
@@ -136,16 +167,23 @@ def main() -> None:
         choices=("enforce", "observe", "passthrough"),
         default="enforce",
         help=(
-            "enforce: gate calls (not built yet). observe: record a decision for every "
-            "call but block nothing. passthrough: forward only. Default: %(default)s"
+            "enforce: allow, hold or block each call. observe: record what enforce would "
+            "do but block nothing. passthrough: forward only. Default: %(default)s"
         ),
+    )
+    parser.add_argument(
+        "--policy",
+        type=Path,
+        default=Path("policy.yaml"),
+        metavar="FILE",
+        help="policy file for enforce and observe modes (default: %(default)s)",
     )
     parser.add_argument(
         "--state-dir",
         type=Path,
         default=Path(".tollgate"),
         metavar="DIR",
-        help="where the audit log and the decision cache are kept (default: %(default)s)",
+        help="where the audit log, held calls and decision cache are kept (default: %(default)s)",
     )
     args = parser.parse_args()
 
@@ -153,17 +191,18 @@ def main() -> None:
     logging.basicConfig(stream=sys.stderr, level=logging.WARNING, format="%(name)s: %(message)s")
     logger.setLevel(logging.INFO)
 
-    if args.mode == "enforce":
-        sys.exit(
-            "tollgate: enforce mode is not built yet; run with --mode observe or --mode passthrough"
-        )
     try:
         configs = load_upstreams(args.upstreams)
-        route = resolve_route() if args.mode == "observe" else None
-        if route is not None:
-            read_api_key(route)
-        asyncio.run(serve(configs, route, args.state_dir))
-    except (UpstreamConfigError, JevConfigError) as error:
+        gating = None
+        if args.mode != "passthrough":
+            gating = Gating(
+                route=resolve_route(),
+                policy=load_policy(args.policy),
+                enforce=args.mode == "enforce",
+            )
+            read_api_key(gating.route)
+        asyncio.run(serve(configs, gating, args.state_dir))
+    except (UpstreamConfigError, JevConfigError, PolicyError) as error:
         sys.exit(f"tollgate: {error}")
     except KeyboardInterrupt:
         pass

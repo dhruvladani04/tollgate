@@ -9,8 +9,8 @@
         "tollgate",
         "--upstreams",
         "examples/upstreams.json",
-        "--mode",
-        "observe"
+        "--policy",
+        "policy.example.yaml"
       ]
     }
   }

@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from tollgate.decide.base import Answer
 
@@ -15,11 +15,18 @@ class AuditRecord(BaseModel):
 
     timestamp: datetime
     mode: str
+    band: str | None = None
+    """The band the policy put the call in: allow, ask, block or escalate."""
+    reasons: list[str] = Field(default_factory=list)
+    """Why the call landed in that band."""
     action: str
-    """What happened to the call, such as `forwarded`."""
+    """What happened to the call: forwarded, blocked, denied or expired."""
+    approval_id: int | None = None
+    """The held call's number in the approval queue, when a person was asked."""
     upstream: str
     tool: str
     arguments: dict[str, Any] | None = None
+    """The call's arguments, with anything that matched a secret pattern redacted."""
     user_request: str | None = None
     request_key: str | None = None
     """Hash of the exact decision request; the same key finds it in the cache."""
@@ -31,6 +38,6 @@ class AuditRecord(BaseModel):
     """Time spent getting the decision, which is the delay Tollgate added to the call."""
     input_tokens: int | None = None
     output_tokens: int | None = None
-    answers: dict[str, Answer] = {}
+    answers: dict[str, Answer] = Field(default_factory=dict)
     error: str | None = None
     """Why there is no decision, when the model gave none."""

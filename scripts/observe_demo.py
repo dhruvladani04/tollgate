@@ -81,6 +81,8 @@ async def run_calls() -> list[str]:
             "examples/upstreams.json",
             "--mode",
             "observe",
+            "--policy",
+            "policy.example.yaml",
             "--state-dir",
             str(STATE_DIR),
         ],

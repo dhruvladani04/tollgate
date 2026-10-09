@@ -5,10 +5,10 @@ coming back, with [Jev](https://docs.typesafe.ai/) before letting it through. It
 between an MCP client (Claude Code, Cursor, a LangGraph agent) and the upstream MCP servers.
 Each call ends one of three ways: allow, ask a human, or block.
 
-**Status: early build.** Tollgate can observe: it asks Jev about every tool call and
-records the answer, but it does not block anything yet. The policy engine that acts on the
-answers and the evaluation are still to come; see the milestones in
-[docs/spec.md](docs/spec.md).
+**Status: early build.** Tollgate gates tool calls: it allows them, holds them for a person,
+or blocks them. Its thresholds are the untuned starting values from the build plan. Tuning
+them on labelled data, measuring the result, and scanning tool results are still to come;
+see the milestones in [docs/spec.md](docs/spec.md).
 
 Tollgate is not a security guarantee. Jev's vendor says adversarial content can move its
 answers, so Tollgate is one layer of defense, not the only one.
@@ -22,12 +22,12 @@ uv sync
 uv run pytest
 ```
 
-The tests use no network and need no API key. A few of them start real server processes, so
-the run takes about 45 seconds.
+The tests need no API key. A few of them start real server processes, so the run takes
+about 45 seconds.
 
 ## Give Tollgate a Jev key
 
-Observing needs an API key for Jev, through either route:
+Gating needs an API key for Jev, through either route:
 
 | Route | Set these variables |
 | --- | --- |
@@ -35,12 +35,22 @@ Observing needs an API key for Jev, through either route:
 | OpenRouter | `OPENROUTER_API_KEY` and `TOLLGATE_JEV_ROUTE=openrouter` |
 
 Put them in a file named `.env` in the repo root, one `NAME=value` per line. Git ignores
-that file. Both routes pin Jev to version 1.13.0, so that thresholds tuned later stay valid.
+that file. Both routes pin Jev to version 1.13.0, so that tuned thresholds stay valid.
 
 To check the key, send one request that asks a Noul, a Score and a Choice question:
 
 ```text
 uv run --env-file .env python scripts/smoke_jev.py
+```
+
+## See it work
+
+The demo starts Tollgate in front of two real MCP servers and plays both the client and the
+person approving. It shows a call allowed, two blocked, one held until approved, one held
+and denied, and one held because the model was given no time to answer:
+
+```text
+uv run --env-file .env python scripts/enforce_demo.py
 ```
 
 ## Run the proxy
@@ -56,35 +66,84 @@ MCP clients use, so an existing client config works as it is.
 
 | Mode | What happens |
 | --- | --- |
-| `observe` | Jev is asked about the call, the answer is recorded, and the call is forwarded whatever the answer. |
-| `passthrough` | The call is forwarded. Nothing is asked or recorded. Needs no key. |
-| `enforce` | The default. Not built yet, so Tollgate exits with a message. |
+| `enforce` | The default. The call is allowed, held for a person, or blocked. |
+| `observe` | The same verdict is recorded, but every call is forwarded. Use it to see what enforcing would do before turning it on. |
+| `passthrough` | The call is forwarded. Nothing is judged or recorded. Needs no key or policy. |
 
-To use Tollgate from Claude Code in observe mode, start Claude Code in the repo root with
-the example client config, which loads `.env`:
+## Use Tollgate with Claude Code
+
+Start Claude Code in the repo root with the example client config, which loads `.env` and
+[policy.example.yaml](policy.example.yaml):
 
 ```text
-claude --mcp-config examples/claude_code.mcp.json
+claude --mcp-config examples/claude_code.mcp.json --allowedTools "mcp__tollgate__*" --disallowedTools "Edit" "Write"
 ```
 
 `/mcp` should then show `tollgate` with 15 tools: 14 from the filesystem server and `fetch`.
 Starting takes several seconds, because Tollgate starts each upstream before it answers.
 
+The two extra options matter:
+
+- **`--allowedTools "mcp__tollgate__*"`** stops Claude Code asking for permission before
+  each Tollgate tool call. Without it you answer twice for one call: Claude Code's own
+  prompt first, then Tollgate's hold.
+- **`--disallowedTools "Edit" "Write"`** turns off Claude Code's built-in file-writing
+  tools. Without it Claude Code usually changes files with its own tools, which never pass
+  through Tollgate.
+
+When Tollgate holds a call, Claude Code waits for it. Answer from a second terminal with
+`tollgate-approve`, described below.
+
+Tollgate only sees calls to its own tools. Claude Code's built-in tools, including its
+shell, are outside it, so a file can still be changed without Tollgate knowing. Tollgate
+adds the most where the client has no built-in tool of its own, such as GitHub, a database
+or email.
+
+## How a call is judged
+
+1. **Exact checks first.** A tool on the deny list, an argument that matches a secret
+   pattern, or a path outside the allowed folders blocks the call. A tool on the allow list
+   is let through. Arguments too large to judge are held. None of these reach the model, so
+   a secret is never sent to it.
+2. **Then the model.** Jev answers up to four questions about the call: how risky it is,
+   whether it destroys data, whether it serves the user's request, and whether it sends data
+   somewhere the request never named.
+3. **Then the policy.** Code compares the answers with the thresholds in the policy file:
+
+| Band | When | What Tollgate does |
+| --- | --- | --- |
+| Allow | Low risk, and no answer over its threshold | Forwards the call |
+| Ask | Risky or destructive | Holds the call for a person |
+| Block | Sends data where the request never named, or high risk and off task | Refuses the call and tells the agent why |
+| Escalate | An answer that matters is uncertain | Holds the call for a person; a second model will judge these later |
+
+If the model does not answer in time, or fails, the call is held for a person. It is never
+allowed by default.
+
+Every number lives in the policy file, and a policy that leaves one out is rejected.
+[policy.example.yaml](policy.example.yaml) explains each setting.
+
+## Approve or deny a held call
+
+A held call waits until a person answers it. From a terminal in the repo root:
+
+```text
+uv run tollgate-approve list
+uv run tollgate-approve approve 3
+uv run tollgate-approve deny 3
+```
+
+`list` shows each held call with its arguments and the reason it was held. A call that
+nobody answers within the policy's `approval.timeout_seconds` is refused.
+
 ## See what was recorded
 
-Every call in observe mode writes one row to `.tollgate/audit.sqlite`: the tool and its
-arguments, Jev's probability for each question, the model version that answered, the time
-the decision took and the tokens it used. To print the latest rows:
+Every call Tollgate judges writes one row to `.tollgate/audit.sqlite`: the tool and its
+arguments, the band and the reasons for it, what happened to the call, Jev's answers, the
+model version, the time the decision took and the tokens it used. Secrets are redacted.
 
 ```text
 uv run python -m tollgate.audit
-```
-
-To see the whole loop without an MCP client of your own, run the demo. It sends five calls
-through Tollgate and prints the audit log:
-
-```text
-uv run --env-file .env python scripts/observe_demo.py
 ```
 
 Identical requests are answered from a cache in `.tollgate/jev-cache.jsonl`, so a repeated
@@ -102,8 +161,8 @@ request passes it in the `_meta` of each tool call:
 | `io.github.dhruvladani04.tollgate/user_request` | The user's request, as a string |
 | `io.github.dhruvladani04.tollgate/recent_context` | Recent turns, as a list of strings; the last two are used |
 
-Without them, Tollgate asks only how risky the call is and whether it destroys data. Claude
-Code does not send them, so calls from Claude Code get those two answers only.
+Without them, Tollgate asks only how risky the call is and whether it destroys data, so it
+can allow or hold a call but has no grounds to block one. Claude Code does not send them.
 
 ## How upstreams are treated
 

@@ -10,11 +10,13 @@ requires-python = ">=3.12"
 dependencies = [
     "mcp>=2.3.0",
     "pydantic>=2.14.0",
+    "pyyaml>=6.0.3",
     "typesafe-sdk>=0.7.2",
 ]
 
 [project.scripts]
 tollgate = "tollgate.proxy.server:main"
+tollgate-approve = "tollgate.approve.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.11.28,<0.12.0"]

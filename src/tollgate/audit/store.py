@@ -1,4 +1,4 @@
-"""The audit log: one SQLite row for every tool call Tollgate asks a model about."""
+"""The audit log: one SQLite row for every tool call Tollgate judges."""
 
 import json
 import sqlite3
@@ -8,30 +8,37 @@ from typing import Self
 
 from tollgate.audit.models import AuditRecord
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS decisions (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp     TEXT NOT NULL,
-    mode          TEXT NOT NULL,
-    action        TEXT NOT NULL,
-    upstream      TEXT NOT NULL,
-    tool          TEXT NOT NULL,
-    arguments     TEXT,
-    user_request  TEXT,
-    request_key   TEXT,
-    backend       TEXT,
-    model         TEXT,
-    cached        INTEGER NOT NULL,
-    latency_ms    REAL,
-    input_tokens  INTEGER,
-    output_tokens INTEGER,
-    answers       TEXT NOT NULL,
-    error         TEXT
-)
-"""
+# One column per field of an audit record.
+_COLUMN_TYPES = {
+    "timestamp": "TEXT NOT NULL",
+    "mode": "TEXT NOT NULL",
+    "band": "TEXT",
+    "reasons": "TEXT",
+    "action": "TEXT NOT NULL",
+    "approval_id": "INTEGER",
+    "upstream": "TEXT NOT NULL",
+    "tool": "TEXT NOT NULL",
+    "arguments": "TEXT",
+    "user_request": "TEXT",
+    "request_key": "TEXT",
+    "backend": "TEXT",
+    "model": "TEXT",
+    "cached": "INTEGER NOT NULL",
+    "latency_ms": "REAL",
+    "input_tokens": "INTEGER",
+    "output_tokens": "INTEGER",
+    "answers": "TEXT NOT NULL",
+    "error": "TEXT",
+}
 _COLUMNS = tuple(AuditRecord.model_fields)
-# `arguments` and `answers` hold JSON, so SQLite's JSON functions can query them.
-_JSON_COLUMNS = ("arguments", "answers")
+assert set(_COLUMNS) == set(_COLUMN_TYPES), "every audit field needs a column type"
+# These hold JSON, so SQLite's JSON functions can query them.
+_JSON_COLUMNS = ("arguments", "answers", "reasons")
+_CREATE = (
+    "CREATE TABLE IF NOT EXISTS decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+    + ", ".join(f"{name} {_COLUMN_TYPES[name]}" for name in _COLUMNS)
+    + ")"
+)
 _INSERT = (
     f"INSERT INTO decisions ({', '.join(_COLUMNS)}) "
     f"VALUES ({', '.join(':' + column for column in _COLUMNS)})"
@@ -43,8 +50,18 @@ class AuditStore:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(path)
-        self._connection.execute(_SCHEMA)
+        self._connection.execute(_CREATE)
+        self._add_missing_columns()
         self._connection.commit()
+
+    def _add_missing_columns(self) -> None:
+        """Bring a log written by an earlier version up to the current columns."""
+        existing = {row[1] for row in self._connection.execute("PRAGMA table_info(decisions)")}
+        for name in _COLUMNS:
+            if name not in existing:
+                # Every column added since the first version is optional.
+                column_type = _COLUMN_TYPES[name].removesuffix(" NOT NULL")
+                self._connection.execute(f"ALTER TABLE decisions ADD COLUMN {name} {column_type}")
 
     def write(self, record: AuditRecord) -> int:
         """Append one record and return its row id."""
@@ -60,9 +77,14 @@ class AuditStore:
         """The latest records, newest first."""
         records = []
         for values in self._connection.execute(_SELECT, (limit,)):
-            row = dict(zip(_COLUMNS, values, strict=True))
+            # An empty column means the field keeps its default.
+            row = {
+                name: value
+                for name, value in zip(_COLUMNS, values, strict=True)
+                if value is not None
+            }
             for column in _JSON_COLUMNS:
-                if row[column] is not None:
+                if column in row:
                     row[column] = json.loads(row[column])
             records.append(AuditRecord.model_validate(row))
         return records

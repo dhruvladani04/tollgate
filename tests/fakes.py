@@ -1,8 +1,13 @@
 """Stand-ins shared by the proxy and decision tests."""
 
+import asyncio
+from pathlib import Path
+
+import yaml
 from mcp import types
 
 from tollgate.decide.base import Decision, DecisionRequest, NoulAnswer, ScoreAnswer
+from tollgate.policy.schema import Policy, parse_policy
 
 
 def tool(name: str, description: str | None = None) -> types.Tool:
@@ -49,12 +54,52 @@ class FakeDecisionModel:
     backend = "fake"
     model = "fake-1"
 
-    def __init__(self, outcome: Decision | Exception = DECISION) -> None:
+    def __init__(self, outcome: Decision | Exception = DECISION, delay: float = 0.0) -> None:
         self.outcome = outcome
+        self.delay = delay
         self.requests: list[DecisionRequest] = []
 
     async def decide(self, request: DecisionRequest) -> Decision:
         self.requests.append(request)
+        await asyncio.sleep(self.delay)
         if isinstance(self.outcome, Exception):
             raise self.outcome
         return self.outcome
+
+
+EXAMPLE_POLICY = Path(__file__).resolve().parents[1] / "policy.example.yaml"
+
+
+def policy(**sections: dict) -> Policy:
+    """The example policy with its exact checks switched off, then any changes applied.
+
+    Each keyword names a section and gives the fields to change in it, for example
+    `policy(approval={"timeout_seconds": 1})`.
+    """
+    document = yaml.safe_load(EXAMPLE_POLICY.read_text(encoding="utf-8"))
+    document["prefilter"]["allow_tools"] = []
+    document["prefilter"]["path_sandbox"]["roots"] = []
+    for section, changes in sections.items():
+        if section == "tools":
+            document["tools"] = changes
+        else:
+            document[section] |= changes
+    return parse_policy(document)
+
+
+def decision(
+    risk: float = 0.0,
+    destructive: float = 0.02,
+    on_task: float | None = None,
+    exfiltration: float | None = None,
+) -> Decision:
+    """A decision with clear answers, harmless unless a value says otherwise."""
+    answers: dict = {
+        "risk": ScoreAnswer(score=risk, probabilities=(1.0, 0.0, 0.0, 0.0), confidence=1.0),
+        "destructive": NoulAnswer(probability=destructive),
+    }
+    if on_task is not None:
+        answers["on_task"] = NoulAnswer(probability=on_task)
+    if exfiltration is not None:
+        answers["exfiltration"] = NoulAnswer(probability=exfiltration)
+    return Decision(answers=answers, model="jev-1.13.0", input_tokens=431, output_tokens=58)

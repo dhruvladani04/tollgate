@@ -1,0 +1,56 @@
+# Tollgate policy. Every number the gate decides with lives in this file.
+#
+# These are the starting values from the build plan. They are not tuned:
+# milestone M4 replaces the thresholds with values fitted to labelled data.
+
+decision:
+  # Budget for one decision, retries included. If the model has not answered by
+  # then, the call is held for a person. It is never allowed by default.
+  timeout_ms: 800
+  max_retries: 2
+
+thresholds:
+  # `risk` is a score from 0 (read-only) to 3 (destroys data, spends money or
+  # sends data to a third party).
+  risk_ask: 1.0        # at or above this, a person decides
+  risk_block: 2.2      # above this, an off-task call is blocked
+  # The rest are probabilities from 0 to 1.
+  destructive: 0.5     # above this, a person decides
+  exfiltration: 0.5    # above this, the call is blocked
+  on_task: 0.5         # below this, the call counts as off task
+  # An answer less confident than this is escalated instead of acted on.
+  confidence: 0.5
+
+prefilter:
+  # Exact checks. A call they decide never reaches the model.
+  allow_tools:
+    - list_allowed_directories
+  deny_tools: []
+  # Larger arguments are not sent to the model; a person decides.
+  max_argument_bytes: 50000
+  # A match blocks the call. The match is redacted wherever arguments are stored or shown.
+  secret_patterns:
+    private_key: '-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----)?'
+    aws_access_key_id: '\bAKIA[0-9A-Z]{16}\b'
+    github_token: '\bgh[pousr]_[A-Za-z0-9]{36,}\b'
+    slack_token: '\bxox[baprs]-[A-Za-z0-9-]{10,}\b'
+    api_key: '\bsk-[A-Za-z0-9_-]{20,}\b'
+    json_web_token: '\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b'
+  path_sandbox:
+    # Path arguments must stay inside these folders. An empty list turns the check off.
+    roots:
+      - examples/sandbox
+    # Argument names that hold a path, or a list of paths.
+    arguments: [path, paths, source, destination]
+
+approval:
+  # A held call that nobody answers is denied after this long.
+  timeout_seconds: 300
+
+# Per-tool overrides of the thresholds above, for example:
+#
+#   tools:
+#     write_file:
+#       thresholds:
+#         destructive: 0.3
+tools: {}

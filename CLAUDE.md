@@ -47,14 +47,17 @@ is early access; OpenRouter needs only an OpenRouter key.
 
 ```text
 uv sync                               install dependencies
-uv run pytest                         run the tests (no network, no key needed)
+uv run pytest                         run the tests (no key needed)
 uv run ruff check .                   lint
 uv run ruff format .                  format
 uv run --env-file .env python scripts/smoke_jev.py    one live Jev call
 uv run --env-file .env python scripts/observe_demo.py         M2 demo: calls plus audit log
+uv run --env-file .env python scripts/enforce_demo.py         M3 demo: allow, block, hold
 uv run --env-file .env python scripts/measure_jev_latency.py  p50 and p95 of Jev from here
 uv run python -m tollgate.audit                       print the latest audit records
-uv run --env-file .env tollgate --upstreams examples/upstreams.json --mode observe
+uv run tollgate-approve list                          show the calls being held
+uv run tollgate-approve approve 3                     or: deny 3
+uv run --env-file .env tollgate --upstreams examples/upstreams.json --policy policy.example.yaml
 ```
 
 `.env` sets `TOLLGATE_JEV_ROUTE` and the key for that route. A few tests start real
@@ -76,11 +79,16 @@ server processes, so the full run takes about 45 seconds.
 - **Errors cross client blocks in groups.** An exception raised inside `async with
   Client(...)` reaches the outside wrapped in an `ExceptionGroup`. Catch it inside the
   block, or unwrap it with `leaf_exceptions`.
+- **Tollgate only sees calls to its own tools.** Claude Code's built-in tools (Edit, Write,
+  the shell) never pass through an MCP server, and the model prefers them unless they are
+  disallowed. Claude Code also asks its own permission before each MCP call unless
+  `mcp__tollgate__*` is allowed, which shows up as a second prompt before Tollgate's hold.
+  The README's Claude Code section has the start command that avoids both.
 - **stdout is the protocol.** Log to stderr only.
 - **Only tools are forwarded so far.** Resources, prompts and upstream notifications are not.
-- **Modes.** `--mode passthrough` forwards only. `--mode observe` asks Jev about every
-  call, writes an audit row, and forwards the call whatever the answer. `--mode enforce`
-  is the default and exits with a message until M3 builds it.
+- **Modes.** `--mode enforce` is the default: each call is allowed, held or blocked.
+  `--mode observe` records the same verdict but forwards every call. `--mode passthrough`
+  forwards only and needs no key or policy.
 
 ## The decision layer
 
@@ -96,7 +104,8 @@ server processes, so the full run takes about 45 seconds.
   call's `_meta` (keys in `decide/questions.py`). Without it, only `risk` and
   `destructive` are asked, because `on_task` and `exfiltration` need `user_request`.
   Claude Code sends no such context.
-- **Arguments go to Jev whole.** Size limits belong to the M3 policy and pre-filter.
+- **Arguments go to Jev whole,** up to the policy's `max_argument_bytes`. Past that, the
+  pre-filter holds the call for a person and the model is not asked.
 - **Cache.** `decide/cache.py` keys on the exact request and stores JSON lines, so an
   evaluation can commit its cache. Jev's answers to the same request vary by a few
   hundredths between calls; a cached answer does not.
@@ -106,6 +115,36 @@ server processes, so the full run takes about 45 seconds.
   test on Windows before turning it back on.
 - **Observe mode blocks nothing.** A model failure or an audit failure is recorded or
   logged, and the call is still forwarded.
+
+## The policy and the gate
+
+- **Every number is in the policy file.** `policy/schema.py` gives no section a default,
+  so a policy that leaves out a threshold is rejected. `policy.example.yaml` holds the
+  spec's starting values, which are untuned until M4.
+- **`Gate` in `proxy/intercept.py` is the whole flow:** pre-filter, then the model within
+  the time budget, then the band engine, then the action, then one audit row.
+- **Pre-filter order** (`policy/prefilter.py`): deny list, secret patterns, path sandbox,
+  allow list, argument size. The first match decides and the model is never asked. A
+  secret therefore never reaches Jev, and it is redacted in the audit log and in the
+  approval queue.
+- **Band engine** (`policy/engine.py`), first match wins:
+  1. Block: a confident `exfiltration`, or a confident risk above `risk_block` on a call
+     that is confidently off task.
+  2. Escalate: an answer that could change the band is uncertain, or `on_task` and
+     `exfiltration` contradict each other.
+  3. Ask: risk at or above `risk_ask`, or `destructive` above its threshold.
+  4. Allow: everything else.
+- **`on_task` only matters for a high-risk call,** so its uncertainty is ignored otherwise.
+  A low-risk off-task call is allowed, as the spec's table says.
+- **Without a user request** the block rules cannot fire, and a high-risk call is held.
+- **Escalate is held like Ask** until M5 adds the LLM judge.
+- **Fail closed.** No decision within `decision.timeout_ms`, or any model error, holds the
+  call for a person. An enforcing gate also refuses a call whose audit row it cannot write.
+- **Approval.** A held call waits in `.tollgate/approvals.sqlite` until `tollgate-approve`
+  answers it or `approval.timeout_seconds` passes, after which it is refused.
+- **Refusals are tool results with `isError`,** not protocol errors, so the agent can read
+  the reason.
+- **A cached decision survives an outage:** the cache answers before the model is asked.
 
 ## Layout
 
@@ -135,12 +174,22 @@ examples/             upstreams file, Claude Code config, sandbox folder (M1); d
 - **M3 must work without a user request.** Generic clients never send one, so the policy
   needs defined behaviour when `on_task` and `exfiltration` were not asked.
 
+Built on Claude's proposal, and not explicitly confirmed by the user:
+
+- A call that matches no band in the spec's table (for example risk above 2.2 that is on
+  task) goes to Ask.
+- The exact outcome of each pre-filter check: deny list, secrets and path sandbox block;
+  oversized arguments are held; the allow list skips the model.
+- Uncertainty escalates only when it could change the band, and a confident block signal
+  wins over an unrelated uncertain answer.
+
 Proposed by Claude and not yet confirmed by the user:
 
-- In M3, a call that matches no band (for example risk above 2.2 that is on task) goes
-  to Ask.
 - In M4, measure every configuration with and without the user request, to publish how
   much knowing the request adds.
+- After M3, approve held calls through MCP elicitation where the client supports it.
+  Claude Code does (form and URL modes, per its docs); today the only approval path is
+  the queue and `tollgate-approve`.
 
 ## Milestone status
 
@@ -155,4 +204,9 @@ Proposed by Claude and not yet confirmed by the user:
   Jev latency from this machine over 30 warm calls: median 328 ms, p95 556 ms, slowest
   587 ms; a first call on a new connection took 488 ms. A four-question request used
   518 input tokens on average.
-- M3 to M6: not started.
+- **M3 Policy and approval:** built. In the live demo on 9 Oct 2026 a destructive
+  overwrite was held until `tollgate-approve` approved it, and with the model given 1 ms
+  to answer a call was held, not allowed. Exact checks blocked an out-of-sandbox path
+  and an access key. About one in five first calls on a new connection took longer than
+  the 800 ms budget in earlier runs, so some calls will be held for that reason alone.
+- M4 to M6: not started.
