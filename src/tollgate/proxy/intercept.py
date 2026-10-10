@@ -1,23 +1,29 @@
 """The one path every tool listing and tool call takes on its way to an upstream."""
 
 import asyncio
+import hashlib
+import hmac
+import json
 import logging
+import secrets
 import sqlite3
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from mcp import types
 
-from tollgate.approve.queue import ApprovalQueue, ApprovalStatus
+from tollgate.approve.prompt import APPROVAL_KEY, APPROVAL_SCHEMA, approval_message
+from tollgate.approve.queue import ApprovalError, ApprovalQueue, ApprovalStatus
 from tollgate.audit.models import AuditRecord
 from tollgate.audit.store import AuditStore
+from tollgate.context import CallContext, context_from_meta, trimmed
 from tollgate.decide.base import Decision, DecisionError, DecisionModel
 from tollgate.decide.cache import request_key
-from tollgate.decide.questions import CallContext, call_request, context_from_meta
+from tollgate.decide.questions import call_request
 from tollgate.policy.engine import Band, Verdict, decide_band, no_decision
 from tollgate.policy.prefilter import prefilter, redact
 from tollgate.policy.schema import Policy
@@ -25,6 +31,10 @@ from tollgate.policy.schema import Policy
 logger = logging.getLogger("tollgate")
 
 CallResult = types.CallToolResult | types.InputRequiredResult
+
+# Marks the `request_state` of Tollgate's own approval question, so that it is
+# never confused with state that belongs to an upstream server.
+_STATE_PREFIX = "tollgate.approval."
 
 
 class RoutingError(Exception):
@@ -41,10 +51,28 @@ class ToolNameCollision(RoutingError):
     pass
 
 
+@dataclass(frozen=True)
+class ClientChannel:
+    """How the gate may ask the user through the MCP client, for one call.
+
+    MCP has two ways to ask. Before the 2026-07-28 protocol, a server sends the
+    client a request in the middle of the call and waits. From 2026-07-28 on, the
+    server answers the call with a question, and the client calls again with the
+    user's answer. A client that supports neither leaves both fields empty.
+    """
+
+    elicit: Callable[[str, dict[str, Any]], Awaitable[types.ElicitResult]] | None = None
+    """Ask now and wait for the answer: takes the message and the form schema."""
+    round_trip: bool = False
+    """Ask by answering the call with an input-required result."""
+
+
 class ToolSource(Protocol):
     async def list_tools(self) -> list[types.Tool]: ...
 
-    async def call_tool(self, params: types.CallToolRequestParams) -> CallResult: ...
+    async def call_tool(
+        self, params: types.CallToolRequestParams, client: ClientChannel | None = None
+    ) -> CallResult: ...
 
 
 @dataclass(frozen=True)
@@ -56,7 +84,7 @@ class RoutedTool:
 class ToolRouter:
     """Presents the tools of several upstreams as one list, under their own names."""
 
-    def __init__(self, upstreams: Mapping[str, ToolSource]) -> None:
+    def __init__(self, upstreams: Mapping[str, Any]) -> None:
         self._upstreams = upstreams
         self._tools: dict[str, RoutedTool] = {}
 
@@ -83,9 +111,25 @@ class ToolRouter:
             raise UnknownTool(f"Unknown tool: {name}")
         return routed
 
-    async def call_tool(self, params: types.CallToolRequestParams) -> CallResult:
+    async def call_tool(
+        self, params: types.CallToolRequestParams, client: ClientChannel | None = None
+    ) -> CallResult:
         routed = await self.find(params.name)
         return await self._upstreams[routed.upstream].call_tool(params)
+
+
+@dataclass(frozen=True)
+class _Judgement:
+    """Everything the gate concluded about one call, kept until the call ends."""
+
+    routed: RoutedTool
+    context: CallContext
+    arguments: dict[str, Any] | None
+    verdict: Verdict
+    decision: Decision | None = None
+    error: str | None = None
+    latency_ms: float | None = None
+    key: str | None = None
 
 
 class Gate:
@@ -95,6 +139,10 @@ class Gate:
     call is put to the model within the policy's time budget, and the band engine
     turns the answers into a verdict. With no usable answer, a person decides: the
     gate fails closed.
+
+    A held call is put in the approval queue, where `tollgate-approve` can answer
+    it. If the client can ask its user, the gate asks there too, and the first
+    answer wins.
 
     When not enforcing, the verdict is recorded and the call is forwarded anyway.
     """
@@ -109,6 +157,7 @@ class Gate:
         *,
         enforce: bool,
         cwd: Path | None = None,
+        ambient_context: Callable[[], CallContext | None] | None = None,
     ) -> None:
         if enforce and approvals is None:
             raise ValueError("enforcing needs an approval queue for the calls it holds")
@@ -119,71 +168,258 @@ class Gate:
         self._approvals = approvals
         self._enforce = enforce
         self._cwd = cwd or Path.cwd()
+        # Where the user's request comes from when the call itself does not carry it,
+        # such as the prompts recorded by the Claude Code hook.
+        self._ambient_context = ambient_context
+        # Calls answered with a question, waiting for the client to call again.
+        self._asked: dict[int, _Judgement] = {}
+        # Signs the state of those questions, so only this process's own are accepted.
+        self._secret = secrets.token_bytes(32)
 
     async def list_tools(self) -> list[types.Tool]:
         return await self._router.list_tools()
 
-    async def call_tool(self, params: types.CallToolRequestParams) -> CallResult:
+    async def call_tool(
+        self, params: types.CallToolRequestParams, client: ClientChannel | None = None
+    ) -> CallResult:
         routed = await self._router.find(params.name)
-        context = context_from_meta(params.meta)
-        # Secrets are kept out of the log and out of anything shown to a person.
-        arguments = redact(params.arguments, self._policy.prefilter)
 
-        decision: Decision | None = None
-        error: str | None = None
-        latency_ms: float | None = None
-        key: str | None = None
-        verdict = prefilter(params.name, params.arguments, self._policy.prefilter, self._cwd)
-        if verdict is None:
-            request = call_request(routed.tool, params.arguments, context)
-            key = request_key(self._model.backend, self._model.model, request)
-            budget_ms = self._policy.decision.timeout_ms
-            started = time.perf_counter()
-            try:
-                decision = await asyncio.wait_for(self._model.decide(request), budget_ms / 1000)
-            except TimeoutError:
-                error = f"timeout: no decision within {budget_ms} ms"
-            except DecisionError as failure:
-                error = f"{failure.kind}: {failure}"
-            except Exception as failure:
-                logger.exception("the decision model failed unexpectedly")
-                error = f"failed: {failure}"
-            latency_ms = (time.perf_counter() - started) * 1000
-            verdict = (
-                decide_band(decision.answers, self._policy.thresholds_for(params.name))
-                if decision is not None
-                else no_decision(error or "unknown failure")
-            )
+        call_id = self._answered_question(params)
+        if call_id is not None:
+            judgement = self._asked.pop(call_id)
+            action = self._read_round_trip_answer(call_id, params)
+            return await self._finish(_without_approval(params), judgement, action, call_id)
 
-        action, approval_id = "forwarded", None
+        judgement = await self._judge(routed, params)
+        action, call_id = "forwarded", None
         if self._enforce:
-            if verdict.band is Band.BLOCK:
+            if judgement.verdict.band is Band.BLOCK:
                 action = "blocked"
-            elif verdict.band is not Band.ALLOW:
+            elif judgement.verdict.band is not Band.ALLOW:
                 # Escalation to a second model is not built yet, so an uncertain
                 # call is held for a person, exactly as an Ask is.
-                action, approval_id = await self._hold(routed, arguments, context, verdict)
+                call_id = self._hold(judgement)
+                if client is not None and client.round_trip:
+                    self._asked[call_id] = judgement
+                    return self._ask_by_round_trip(call_id, params, judgement)
+                action = await self._wait_for_answer(call_id, judgement, client)
+        return await self._finish(params, judgement, action, call_id)
 
+    # --- judging ------------------------------------------------------------------
+
+    def _context(self, params: types.CallToolRequestParams) -> CallContext:
+        """What is known about the user's request: from the call first, else the hook."""
+        context = context_from_meta(params.meta)
+        if context.user_request is None and self._ambient_context is not None:
+            context = self._ambient_context() or context
+        return trimmed(context, self._policy.context.max_chars)
+
+    async def _judge(self, routed: RoutedTool, params: types.CallToolRequestParams) -> _Judgement:
+        context = self._context(params)
+        # Secrets are kept out of the log and out of anything shown to a person.
+        arguments = redact(params.arguments, self._policy.prefilter)
+        verdict = prefilter(params.name, params.arguments, self._policy.prefilter, self._cwd)
+        if verdict is not None:
+            return _Judgement(routed, context, arguments, verdict)
+
+        request = call_request(routed.tool, params.arguments, context)
+        key = request_key(self._model.backend, self._model.model, request)
+        budget_ms = self._policy.decision.timeout_ms
+        decision: Decision | None = None
+        error: str | None = None
+        started = time.perf_counter()
+        try:
+            decision = await asyncio.wait_for(self._model.decide(request), budget_ms / 1000)
+        except TimeoutError:
+            error = f"timeout: no decision within {budget_ms} ms"
+        except DecisionError as failure:
+            error = f"{failure.kind}: {failure}"
+        except Exception as failure:
+            logger.exception("the decision model failed unexpectedly")
+            error = f"failed: {failure}"
+        latency_ms = (time.perf_counter() - started) * 1000
+        verdict = (
+            decide_band(decision.answers, self._policy.thresholds_for(params.name))
+            if decision is not None
+            else no_decision(error or "unknown failure")
+        )
+        return _Judgement(routed, context, arguments, verdict, decision, error, latency_ms, key)
+
+    # --- holding a call for a person ----------------------------------------------
+
+    def _hold(self, judgement: _Judgement) -> int:
+        assert self._approvals is not None
+        call_id = self._approvals.submit(
+            upstream=judgement.routed.upstream,
+            tool=judgement.routed.tool.name,
+            arguments=judgement.arguments,
+            user_request=judgement.context.user_request,
+            reasons=judgement.verdict.reasons,
+            timeout_seconds=self._policy.approval.timeout_seconds,
+        )
+        logger.info(
+            "holding %s as #%d for approval: %s",
+            judgement.routed.tool.name,
+            call_id,
+            "; ".join(judgement.verdict.reasons),
+        )
+        return call_id
+
+    def _question(self, call_id: int, judgement: _Judgement) -> str:
+        return approval_message(
+            call_id=call_id,
+            tool=judgement.routed.tool.name,
+            upstream=judgement.routed.upstream,
+            reasons=judgement.verdict.reasons,
+            arguments=judgement.arguments,
+        )
+
+    async def _wait_for_answer(
+        self, call_id: int, judgement: _Judgement, client: ClientChannel | None
+    ) -> str:
+        """Wait for the first answer, from the queue or from the client's user."""
+        assert self._approvals is not None
+        from_queue = asyncio.create_task(self._approvals.wait(call_id))
+        from_client = (
+            asyncio.create_task(self._ask_in_client(client.elicit, call_id, judgement))
+            if client is not None and client.elicit is not None
+            else None
+        )
+        try:
+            if from_client is not None:
+                await asyncio.wait({from_queue, from_client}, return_when=asyncio.FIRST_COMPLETED)
+                if not from_queue.done() and (approved := from_client.result()) is not None:
+                    self._record_answer(call_id, approved)
+            status = await from_queue
+        except asyncio.CancelledError:
+            self._approvals.close_out(call_id, ApprovalStatus.CANCELLED)
+            raise
+        finally:
+            for task in (from_queue, from_client):
+                if task is not None and not task.done():
+                    task.cancel()
+        logger.info("held call #%d was %s", call_id, status)
+        return "forwarded" if status is ApprovalStatus.APPROVED else str(status)
+
+    async def _ask_in_client(
+        self,
+        elicit: Callable[[str, dict[str, Any]], Awaitable[types.ElicitResult]],
+        call_id: int,
+        judgement: _Judgement,
+    ) -> bool | None:
+        """Ask the client's user. None means the client could not be asked."""
+        logger.info("asking the client's user about held call #%d", call_id)
+        try:
+            result = await elicit(self._question(call_id, judgement), APPROVAL_SCHEMA)
+        except Exception as error:
+            # The queue is still open, so a client that cannot ask is not a failure.
+            logger.warning("could not ask the client about held call #%d: %s", call_id, error)
+            return None
+        return result.action == "accept"
+
+    def _record_answer(self, call_id: int, approved: bool) -> None:
+        assert self._approvals is not None
+        try:
+            self._approvals.answer(call_id, approve=approved)
+        except ApprovalError:
+            # Someone answered through the queue first, or time ran out. That stands.
+            pass
+
+    # --- asking by round trip (the 2026-07-28 protocol) ---------------------------
+
+    def _ask_by_round_trip(
+        self, call_id: int, params: types.CallToolRequestParams, judgement: _Judgement
+    ) -> types.InputRequiredResult:
+        """Answer the call with the approval question; the client calls again with the answer."""
+        assert self._approvals is not None
+        # A client that never calls back would otherwise leave its question here for good.
+        for stale in [asked for asked in self._asked if asked != call_id]:
+            held = self._approvals.get(stale)
+            if held is None or datetime.now(UTC) >= held.expires:
+                del self._asked[stale]
+        logger.info("asking the client's user about held call #%d by round trip", call_id)
+        question = types.ElicitRequest(
+            params=types.ElicitRequestFormParams(
+                message=self._question(call_id, judgement),
+                requested_schema=APPROVAL_SCHEMA,
+            )
+        )
+        return types.InputRequiredResult(
+            input_requests={APPROVAL_KEY: question},
+            request_state=self._sign(call_id, _call_digest(params)),
+        )
+
+    def _sign(self, call_id: int, digest: str) -> str:
+        body = f"{call_id}.{digest}"
+        signature = hmac.new(self._secret, body.encode(), hashlib.sha256).hexdigest()
+        return f"{_STATE_PREFIX}{body}.{signature}"
+
+    def _answered_question(self, params: types.CallToolRequestParams) -> int | None:
+        """The held call this request answers, if it carries this gate's own question state.
+
+        The state must be signed by this process and bound to the same tool and
+        arguments. Anything else is treated as a new call and judged afresh.
+        """
+        state = params.request_state
+        if not state or not state.startswith(_STATE_PREFIX):
+            return None
+        try:
+            call_id_text, digest, signature = state.removeprefix(_STATE_PREFIX).split(".")
+            call_id = int(call_id_text)
+        except ValueError:
+            return None
+        if not hmac.compare_digest(self._sign(call_id, digest), state):
+            return None
+        if digest != _call_digest(params) or call_id not in self._asked:
+            return None
+        return call_id
+
+    def _read_round_trip_answer(self, call_id: int, params: types.CallToolRequestParams) -> str:
+        """Turn the answer the client sent back into what happens to the call."""
+        assert self._approvals is not None
+        response = (params.input_responses or {}).get(APPROVAL_KEY)
+        if isinstance(response, types.ElicitResult):
+            self._record_answer(call_id, response.action == "accept")
+        held = self._approvals.get(call_id)
+        status = held.status if held is not None else ApprovalStatus.EXPIRED
+        if status is ApprovalStatus.PENDING:
+            # The client called back without an answer, or after time ran out.
+            expired = held is not None and datetime.now(UTC) >= held.expires
+            status = ApprovalStatus.EXPIRED if expired else ApprovalStatus.DENIED
+            self._approvals.close_out(call_id, status)
+        logger.info("held call #%d was %s", call_id, status)
+        return "forwarded" if status is ApprovalStatus.APPROVED else str(status)
+
+    # --- recording and acting -----------------------------------------------------
+
+    async def _finish(
+        self,
+        params: types.CallToolRequestParams,
+        judgement: _Judgement,
+        action: str,
+        call_id: int | None,
+    ) -> CallResult:
+        decision = judgement.decision
         record = AuditRecord(
             timestamp=datetime.now(UTC),
             mode="enforce" if self._enforce else "observe",
-            band=verdict.band,
-            reasons=list(verdict.reasons),
+            band=judgement.verdict.band,
+            reasons=list(judgement.verdict.reasons),
             action=action,
-            approval_id=approval_id,
-            upstream=routed.upstream,
+            approval_id=call_id,
+            upstream=judgement.routed.upstream,
             tool=params.name,
-            arguments=arguments,
-            user_request=context.user_request,
-            request_key=key,
-            backend=self._model.backend if key else None,
+            arguments=judgement.arguments,
+            user_request=judgement.context.user_request,
+            request_key=judgement.key,
+            backend=self._model.backend if judgement.key else None,
             model=decision.model if decision else None,
             cached=decision.cached if decision else False,
-            latency_ms=latency_ms,
+            latency_ms=judgement.latency_ms,
             input_tokens=decision.input_tokens if decision else None,
             output_tokens=decision.output_tokens if decision else None,
             answers=decision.answers if decision else {},
-            error=error,
+            error=judgement.error,
         )
         try:
             self._audit.write(record)
@@ -198,38 +434,23 @@ class Gate:
 
         if action == "forwarded":
             return await self._router.call_tool(params)
-        return _refusal(_explain(action, approval_id, verdict, self._policy))
+        return _refusal(_explain(action, call_id, judgement.verdict, self._policy))
 
-    async def _hold(
-        self,
-        routed: RoutedTool,
-        arguments: dict | None,
-        context: CallContext,
-        verdict: Verdict,
-    ) -> tuple[str, int]:
-        """Hold a call until a person answers or time runs out; return what happened."""
-        assert self._approvals is not None
-        call_id = self._approvals.submit(
-            upstream=routed.upstream,
-            tool=routed.tool.name,
-            arguments=arguments,
-            user_request=context.user_request,
-            reasons=verdict.reasons,
-            timeout_seconds=self._policy.approval.timeout_seconds,
-        )
-        logger.info(
-            "holding %s as #%d for approval: %s",
-            routed.tool.name,
-            call_id,
-            "; ".join(verdict.reasons),
-        )
-        try:
-            status = await self._approvals.wait(call_id)
-        except asyncio.CancelledError:
-            self._approvals.close_out(call_id, ApprovalStatus.CANCELLED)
-            raise
-        logger.info("held call #%d was %s", call_id, status)
-        return ("forwarded" if status is ApprovalStatus.APPROVED else str(status)), call_id
+
+def _call_digest(params: types.CallToolRequestParams) -> str:
+    """A hash of the tool and arguments, which ties an approval to one exact call."""
+    canonical = json.dumps(
+        {"tool": params.name, "arguments": params.arguments},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _without_approval(params: types.CallToolRequestParams) -> types.CallToolRequestParams:
+    """The call as the upstream should see it, without Tollgate's own question and answer."""
+    return params.model_copy(update={"input_responses": None, "request_state": None})
 
 
 def _refusal(text: str) -> types.CallToolResult:

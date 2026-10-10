@@ -17,6 +17,7 @@ dependencies = [
 [project.scripts]
 tollgate = "tollgate.proxy.server:main"
 tollgate-approve = "tollgate.approve.cli:main"
+tollgate-hook = "tollgate.prompts:main"
 
 [build-system]
 requires = ["uv_build>=0.11.28,<0.12.0"]

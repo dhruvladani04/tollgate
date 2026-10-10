@@ -1,16 +1,13 @@
 """`tollgate-approve`: see the calls Tollgate is holding, and approve or deny them."""
 
 import argparse
-import json
 import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
+from tollgate.approve.prompt import preview_arguments
 from tollgate.approve.queue import APPROVALS_FILE, ApprovalError, ApprovalQueue, HeldCall
-
-# How much of a call's arguments the list shows before cutting them off.
-ARGUMENT_PREVIEW_CHARS = 300
 
 
 def render(held: Sequence[HeldCall]) -> str:
@@ -20,15 +17,12 @@ def render(held: Sequence[HeldCall]) -> str:
     now = datetime.now(UTC)
     blocks = []
     for call in held:
-        arguments = json.dumps(call.arguments or {}, ensure_ascii=False)
-        if len(arguments) > ARGUMENT_PREVIEW_CHARS:
-            arguments = arguments[:ARGUMENT_PREVIEW_CHARS] + " ..."
         lines = [
             f"#{call.id}  {call.tool}  (from {call.upstream})  waiting "
             f"{(now - call.created).total_seconds():.0f} s, "
             f"{max((call.expires - now).total_seconds(), 0):.0f} s left",
             *(f"    why: {reason}" for reason in call.reasons),
-            f"    arguments: {arguments}",
+            f"    arguments: {preview_arguments(call.arguments)}",
         ]
         if call.user_request:
             lines.append(f"    user asked: {call.user_request}")

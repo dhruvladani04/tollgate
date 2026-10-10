@@ -72,27 +72,29 @@ MCP clients use, so an existing client config works as it is.
 
 ## Use Tollgate with Claude Code
 
-Start Claude Code in the repo root with the example client config, which loads `.env` and
-[policy.example.yaml](policy.example.yaml):
+Start Claude Code in the repo root with the example client config and the example settings:
 
 ```text
-claude --mcp-config examples/claude_code.mcp.json --allowedTools "mcp__tollgate__*" --disallowedTools "Edit" "Write"
+claude --mcp-config examples/claude_code.mcp.json --settings examples/claude_code.settings.json
 ```
 
 `/mcp` should then show `tollgate` with 15 tools: 14 from the filesystem server and `fetch`.
 Starting takes several seconds, because Tollgate starts each upstream before it answers.
 
-The two extra options matter:
+[examples/claude_code.mcp.json](examples/claude_code.mcp.json) starts Tollgate with `.env`
+and [policy.example.yaml](policy.example.yaml).
+[examples/claude_code.settings.json](examples/claude_code.settings.json) sets three things:
 
-- **`--allowedTools "mcp__tollgate__*"`** stops Claude Code asking for permission before
-  each Tollgate tool call. Without it you answer twice for one call: Claude Code's own
-  prompt first, then Tollgate's hold.
-- **`--disallowedTools "Edit" "Write"`** turns off Claude Code's built-in file-writing
-  tools. Without it Claude Code usually changes files with its own tools, which never pass
-  through Tollgate.
+- **It allows Tollgate's tools** (`mcp__tollgate__*`), so Claude Code does not ask for
+  permission before each one. Without this you answer twice for one call: Claude Code's own
+  prompt first, then Tollgate's.
+- **It denies Claude Code's built-in `Edit` and `Write` tools.** Without this Claude Code
+  usually changes files with its own tools, which never pass through Tollgate.
+- **It runs `tollgate-hook` on every prompt,** which tells Tollgate what you asked for. The
+  section "Tell Tollgate what the user asked for" below explains why that matters.
 
-When Tollgate holds a call, Claude Code waits for it. Answer from a second terminal with
-`tollgate-approve`, described below.
+When Tollgate holds a call, Claude Code shows you the question and you accept or decline
+there. `tollgate-approve`, described below, works from a second terminal as well.
 
 Tollgate only sees calls to its own tools. Claude Code's built-in tools, including its
 shell, are outside it, so a file can still be changed without Tollgate knowing. Tollgate
@@ -125,7 +127,13 @@ Every number lives in the policy file, and a policy that leaves one out is rejec
 
 ## Approve or deny a held call
 
-A held call waits until a person answers it. From a terminal in the repo root:
+A held call waits until a person answers it. There are two ways to answer, and the first
+answer wins:
+
+- **In the client.** If the MCP client can ask its user a question (MCP calls this
+  elicitation, and Claude Code supports it), Tollgate asks there. Accepting lets the call
+  run; declining or dismissing refuses it.
+- **From a terminal.** This always works, whatever the client:
 
 ```text
 uv run tollgate-approve list
@@ -153,16 +161,32 @@ call costs nothing and takes no time.
 
 MCP sends a server the tool name and the arguments, and nothing about the conversation.
 Two of Tollgate's four questions need the user's request: whether the call serves it, and
-whether the call sends data somewhere the request never named. A client that knows the
-request passes it in the `_meta` of each tool call:
+whether the call sends data somewhere the request never named. Without the request,
+Tollgate asks only how risky the call is and whether it destroys data, so it can allow or
+hold a call but has no grounds to block one.
+
+There are two ways to give Tollgate the request.
+
+**From Claude Code, with a hook.** The example settings run `tollgate-hook` on every prompt.
+It saves the prompt to `.tollgate/prompts.json`, and Tollgate uses the latest prompt as the
+request and the two before it as recent context. Things to know:
+
+- The latest prompt is not always the task. After a reply such as "yes, go ahead", the
+  request is those words, and the task is only in the recent context.
+- Prompts are matched to Tollgate by project folder. Two Claude Code sessions open in the
+  same folder share one prompt file.
+- Only prompts typed after Tollgate started are used, so a new session never inherits an
+  old session's request.
+- Your prompts are stored in that file and in the audit log, and they are sent to Jev with
+  each call it judges. The policy's `context.max_chars` limits how much of each is sent.
+
+**From any other client, in the call.** A client that knows the request passes it in the
+`_meta` of each tool call. A request sent this way takes priority over the hook.
 
 | `_meta` key | Value |
 | --- | --- |
 | `io.github.dhruvladani04.tollgate/user_request` | The user's request, as a string |
 | `io.github.dhruvladani04.tollgate/recent_context` | Recent turns, as a list of strings; the last two are used |
-
-Without them, Tollgate asks only how risky the call is and whether it destroys data, so it
-can allow or hold a call but has no grounds to block one. Claude Code does not send them.
 
 ## How upstreams are treated
 

@@ -7,6 +7,7 @@ import sys
 from collections.abc import Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from typing import Any
 from mcp import MCPError, types
 from mcp.server import Server, ServerRequestContext
 from mcp.server.stdio import stdio_server
+from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 from typesafe_sdk import RetryPolicy, TypeSafeError
 
 from tollgate.approve.queue import APPROVALS_FILE, ApprovalQueue
@@ -28,7 +30,9 @@ from tollgate.decide.jev import (
     resolve_route,
 )
 from tollgate.policy.schema import Policy, PolicyError, load_policy
+from tollgate.prompts import PROMPTS_FILE, PromptLog
 from tollgate.proxy.intercept import (
+    ClientChannel,
     Gate,
     RoutingError,
     ToolNameCollision,
@@ -57,6 +61,24 @@ class Gating:
     route: JevRoute
     policy: Policy
     enforce: bool
+    started: datetime
+    """When this process started. Prompts recorded before then belong to an earlier session."""
+
+
+def client_channel(ctx: ServerRequestContext[Any]) -> ClientChannel:
+    """Work out how this client's user can be asked about a held call, if at all."""
+    capabilities = ctx.session.client_capabilities
+    elicitation = capabilities.elicitation if capabilities is not None else None
+    # An empty declaration means form mode, the only mode that existed at first.
+    if elicitation is None or (elicitation.form is None and elicitation.url is not None):
+        return ClientChannel()
+    if ctx.session.can_send_request:
+
+        async def elicit(message: str, schema: dict[str, Any]) -> types.ElicitResult:
+            return await ctx.session.elicit_form(message, schema, related_request_id=ctx.request_id)
+
+        return ClientChannel(elicit=elicit)
+    return ClientChannel(round_trip=ctx.protocol_version in MODERN_PROTOCOL_VERSIONS)
 
 
 def build_server(source: ToolSource) -> Server[Any]:
@@ -72,7 +94,7 @@ def build_server(source: ToolSource) -> Server[Any]:
         ctx: ServerRequestContext[Any], params: types.CallToolRequestParams
     ) -> types.CallToolResult | types.InputRequiredResult:
         try:
-            return await source.call_tool(params)
+            return await source.call_tool(params, client_channel(ctx))
         except RoutingError as error:
             raise MCPError(error.code, str(error)) from error
 
@@ -133,14 +155,20 @@ async def serve(
         if gating is None or gate_parts is None:
             logger.info("passthrough mode: no decisions are made and nothing is recorded")
         else:
-            source = Gate(router, *gate_parts, enforce=gating.enforce)
+            prompts = PromptLog(state_dir / PROMPTS_FILE)
+            source = Gate(
+                router,
+                *gate_parts,
+                enforce=gating.enforce,
+                ambient_context=lambda: prompts.context(gating.started),
+            )
             logger.info(
                 "%s mode: asking %s over the %s route, recording to %s. %s",
                 "enforce" if gating.enforce else "observe",
                 gating.route.model,
                 gating.route.name,
                 state_dir / AUDIT_FILE,
-                "Held calls wait for `tollgate-approve`."
+                "Held calls wait for the client's user or for `tollgate-approve`."
                 if gating.enforce
                 else "Nothing is blocked.",
             )
@@ -186,6 +214,7 @@ def main() -> None:
         help="where the audit log, held calls and decision cache are kept (default: %(default)s)",
     )
     args = parser.parse_args()
+    started = datetime.now(UTC)
 
     # stdout carries the MCP protocol, so every log line goes to stderr.
     logging.basicConfig(stream=sys.stderr, level=logging.WARNING, format="%(name)s: %(message)s")
@@ -199,6 +228,7 @@ def main() -> None:
                 route=resolve_route(),
                 policy=load_policy(args.policy),
                 enforce=args.mode == "enforce",
+                started=started,
             )
             read_api_key(gating.route)
         asyncio.run(serve(configs, gating, args.state_dir))

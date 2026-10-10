@@ -6,20 +6,12 @@ answers the words it is given.
 """
 
 from collections.abc import Mapping
-from dataclasses import dataclass
 from typing import Any
 
 from mcp import types
 
+from tollgate.context import RECENT_TURNS, CallContext
 from tollgate.decide.base import DecisionRequest
-
-# How a client tells Tollgate what the user asked for. MCP carries no such field,
-# so a client that knows it sends it in the `_meta` of each tool call.
-USER_REQUEST_META = "io.github.dhruvladani04.tollgate/user_request"
-RECENT_CONTEXT_META = "io.github.dhruvladani04.tollgate/recent_context"
-
-# The spec limits `recent_context` to the last two turns.
-RECENT_TURNS = 2
 
 RISK = {
     "type": "score",
@@ -52,29 +44,6 @@ EXFILTRATION = {
 CALL_QUESTIONS = {"risk": RISK, "destructive": DESTRUCTIVE}
 # Answerable only when the state also holds the user's request.
 REQUEST_QUESTIONS = {"on_task": ON_TASK, "exfiltration": EXFILTRATION}
-
-
-@dataclass(frozen=True)
-class CallContext:
-    """What the client said about the conversation around a call."""
-
-    user_request: str | None = None
-    recent_context: tuple[str, ...] = ()
-
-
-def context_from_meta(meta: Mapping[str, Any] | None) -> CallContext:
-    """Read the call context from a tool call's `_meta`, ignoring anything malformed."""
-    meta = meta or {}
-    user_request = meta.get(USER_REQUEST_META)
-    turns = meta.get(RECENT_CONTEXT_META)
-    return CallContext(
-        user_request=user_request if isinstance(user_request, str) and user_request else None,
-        recent_context=(
-            tuple(turn for turn in turns if isinstance(turn, str))
-            if isinstance(turns, list)
-            else ()
-        ),
-    )
 
 
 def call_request(

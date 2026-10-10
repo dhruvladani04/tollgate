@@ -8,6 +8,7 @@ from mcp import types
 
 from tollgate.decide.base import Decision, DecisionRequest, NoulAnswer, ScoreAnswer
 from tollgate.policy.schema import Policy, parse_policy
+from tollgate.proxy.intercept import Gate, ToolRouter
 
 
 def tool(name: str, description: str | None = None) -> types.Tool:
@@ -103,3 +104,63 @@ def decision(
     if exfiltration is not None:
         answers["exfiltration"] = NoulAnswer(probability=exfiltration)
     return Decision(answers=answers, model="jev-1.13.0", input_tokens=431, output_tokens=58)
+
+
+class Scene:
+    """A gate over one fake upstream, with handles on everything it touches."""
+
+    def __init__(
+        self,
+        audit,
+        approvals,
+        outcome,
+        *,
+        enforce=True,
+        rules=None,
+        cwd=None,
+        delay=0.0,
+        ambient=None,
+    ):
+        self.upstream = FakeUpstream("write_file", "read_file", "delete_everything")
+        self.model = FakeDecisionModel(outcome, delay=delay)
+        self.audit = audit
+        self.approvals = approvals
+        self.gate = Gate(
+            ToolRouter({"files": self.upstream}),
+            self.model,
+            audit,
+            rules or policy(),
+            approvals if enforce else None,
+            enforce=enforce,
+            cwd=cwd,
+            ambient_context=ambient,
+        )
+
+    def run(self, params, client=None):
+        return asyncio.run(asyncio.wait_for(self.gate.call_tool(params, client), 10))
+
+    def run_held(self, params, answer: bool | None):
+        """Make a call that gets held; answer it from a second connection, or leave it."""
+
+        async def scenario():
+            task = asyncio.create_task(self.gate.call_tool(params))
+            while not self.approvals.pending():
+                assert not task.done(), "the call finished without being held"
+                await asyncio.sleep(0.01)
+            [held] = self.approvals.pending()
+            forwarded_while_held = list(self.upstream.calls)
+            if answer is not None:
+                self.approvals.answer(held.id, approve=answer)
+            return held, forwarded_while_held, await asyncio.wait_for(task, 10)
+
+        return asyncio.run(scenario())
+
+    @property
+    def row(self):
+        [row] = self.audit.recent(10)
+        return row
+
+
+def refused(result) -> str:
+    assert result.is_error
+    return result.content[0].text

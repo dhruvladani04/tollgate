@@ -16,9 +16,10 @@ import time
 from mcp import types
 from typesafe_sdk import RetryPolicy, TypeSafeError
 
+from tollgate.context import CallContext
 from tollgate.decide.base import Decision, DecisionError
 from tollgate.decide.jev import JevConfigError, JevDecisionModel, make_client, resolve_route
-from tollgate.decide.questions import CallContext, call_request
+from tollgate.decide.questions import call_request
 
 TOOL = types.Tool(
     name="write_file",

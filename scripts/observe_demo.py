@@ -17,8 +17,8 @@ from mcp import Client, StdioServerParameters
 
 from tollgate.audit.report import render
 from tollgate.audit.store import AuditStore
+from tollgate.context import RECENT_CONTEXT_META, USER_REQUEST_META
 from tollgate.decide.jev import JevConfigError, read_api_key, resolve_route
-from tollgate.decide.questions import RECENT_CONTEXT_META, USER_REQUEST_META
 from tollgate.proxy.server import AUDIT_FILE
 
 REPO = Path(__file__).resolve().parents[1]

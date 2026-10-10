@@ -105,12 +105,18 @@ class ApprovalSettings(_Section):
     """A held call that nobody answers is denied after this long."""
 
 
+class ContextSettings(_Section):
+    max_chars: int = Field(gt=0)
+    """The user's request and each earlier turn are cut to this length for the model."""
+
+
 class ToolPolicy(_Section):
     thresholds: ThresholdOverrides = ThresholdOverrides()
 
 
 class Policy(_Section):
     decision: DecisionSettings
+    context: ContextSettings
     thresholds: Thresholds
     prefilter: Prefilter
     approval: ApprovalSettings

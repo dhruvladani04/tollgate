@@ -58,6 +58,7 @@ uv run python -m tollgate.audit                       print the latest audit rec
 uv run tollgate-approve list                          show the calls being held
 uv run tollgate-approve approve 3                     or: deny 3
 uv run --env-file .env tollgate --upstreams examples/upstreams.json --policy policy.example.yaml
+claude --mcp-config examples/claude_code.mcp.json --settings examples/claude_code.settings.json
 ```
 
 `.env` sets `TOLLGATE_JEV_ROUTE` and the key for that route. A few tests start real
@@ -100,10 +101,19 @@ server processes, so the full run takes about 45 seconds.
   level on its own, without seeing the other levels, so each level describes a whole
   situation. Read the Jev docs (Score, Noul, jaggedness) before rewording anything.
 - **The user's request is not in MCP.** A tool call carries a tool name and arguments,
-  nothing about the conversation. A client that knows the user's request sends it in the
-  call's `_meta` (keys in `decide/questions.py`). Without it, only `risk` and
+  nothing about the conversation. The gate looks for the request in two places, in this
+  order: the call's `_meta` (keys in `context.py`), then the prompts the Claude Code hook
+  recorded (`prompts.py`, file `.tollgate/prompts.json`). Without either, only `risk` and
   `destructive` are asked, because `on_task` and `exfiltration` need `user_request`.
-  Claude Code sends no such context.
+- **The hook's rules.** The latest prompt is the request and the two before it are recent
+  context. Only prompts recorded after this Tollgate process started count, a new session
+  id starts the list again, and a prompt inside a subagent is ignored. The hook prints
+  nothing on stdout (Claude Code would show it to the model) and never exits with status
+  2 (that would block the user's prompt).
+- **Keep `context.py` free of heavy imports.** The hook loads it on every prompt. Importing
+  the MCP SDK there cost 1.2 seconds; without it the import takes 0.06 seconds.
+- **The request and each turn are cut** to the policy's `context.max_chars`, keeping the
+  start and the end.
 - **Arguments go to Jev whole,** up to the policy's `max_argument_bytes`. Past that, the
   pre-filter holds the call for a person and the model is not asked.
 - **Cache.** `decide/cache.py` keys on the exact request and stores JSON lines, so an
@@ -140,8 +150,18 @@ server processes, so the full run takes about 45 seconds.
 - **Escalate is held like Ask** until M5 adds the LLM judge.
 - **Fail closed.** No decision within `decision.timeout_ms`, or any model error, holds the
   call for a person. An enforcing gate also refuses a call whose audit row it cannot write.
-- **Approval.** A held call waits in `.tollgate/approvals.sqlite` until `tollgate-approve`
-  answers it or `approval.timeout_seconds` passes, after which it is refused.
+- **Approval.** A held call always goes into `.tollgate/approvals.sqlite`, where
+  `tollgate-approve` can answer it. If the client declared the elicitation capability,
+  the gate also asks the client's user, and the first answer wins. After
+  `approval.timeout_seconds` with no answer, the call is refused.
+- **Two ways to ask the client,** chosen per call by `client_channel` in
+  `proxy/server.py`. Before the 2026-07-28 protocol the gate sends an elicitation
+  request and waits. On 2026-07-28 servers may not send requests, so the gate answers the
+  call with an input-required result and the client calls again with the answer. That
+  second call carries a state string the gate signed and bound to the tool and
+  arguments; a forged, foreign or reused state is treated as a new call.
+- **Known gap:** if an upstream itself answers a gated call with an input-required
+  result, the client's retry is judged again and may be held a second time.
 - **Refusals are tool results with `isError`,** not protocol errors, so the agent can read
   the reason.
 - **A cached decision survives an outage:** the cache answers before the model is asked.
@@ -158,6 +178,8 @@ src/tollgate/
   approve/            approval queue and CLI (M3)
   audit/              SQLite audit log (M2)
   dashboard/          FastAPI dashboard (M6)
+  context.py          call context types; import-light for the hook
+  prompts.py          the Claude Code hook command and its prompt log
 evals/                golden data, runner, tuning, report (M4)
 scripts/              developer scripts, such as the Jev smoke test
 tests/
@@ -183,13 +205,13 @@ Built on Claude's proposal, and not explicitly confirmed by the user:
 - Uncertainty escalates only when it could change the band, and a confident block signal
   wins over an unrelated uncertain answer.
 
+- **Hook and in-client approval, built in one step (decided 9 Oct 2026).** The user chose
+  to build the Claude Code hook and approval through MCP elicitation together.
+
 Proposed by Claude and not yet confirmed by the user:
 
 - In M4, measure every configuration with and without the user request, to publish how
   much knowing the request adds.
-- After M3, approve held calls through MCP elicitation where the client supports it.
-  Claude Code does (form and URL modes, per its docs); today the only approval path is
-  the queue and `tollgate-approve`.
 
 ## Milestone status
 
@@ -209,4 +231,10 @@ Proposed by Claude and not yet confirmed by the user:
   to answer a call was held, not allowed. Exact checks blocked an out-of-sandbox path
   and an access key. About one in five first calls on a new connection took longer than
   the 800 ms budget in earlier runs, so some calls will be held for that reason alone.
+- **Hook and in-client approval (after M3):** built on 9 Oct 2026. Tests drive both ways
+  of asking the client with the MCP SDK's own client over stdio, and run the hook command
+  against a live Tollgate. Confirmed inside Claude Code on 10 Oct 2026: with the example
+  settings, a `write_file` call got no Claude Code permission prompt, the hook supplied
+  the user's prompt so all four questions were answered, and the hold was approved from
+  the in-client question in 4 seconds.
 - M4 to M6: not started.

@@ -4,14 +4,22 @@ import asyncio
 
 import fake_upstream
 import pytest
-from fakes import DECISION, FakeDecisionModel, FakeUpstream, call, decision, policy, text_result
+from fakes import (
+    DECISION,
+    FakeDecisionModel,
+    Scene,
+    call,
+    decision,
+    policy,
+    refused,
+    text_result,
+)
 from mcp import Client
 
-from tollgate.approve.queue import APPROVALS_FILE, ApprovalQueue, ApprovalStatus
-from tollgate.audit.store import AuditStore
+from tollgate.approve.queue import ApprovalStatus
+from tollgate.context import RECENT_CONTEXT_META, USER_REQUEST_META
 from tollgate.decide.base import DecisionError
 from tollgate.decide.cache import request_key
-from tollgate.decide.questions import RECENT_CONTEXT_META, USER_REQUEST_META
 from tollgate.proxy.intercept import Gate, ToolRouter, UnknownTool
 from tollgate.proxy.server import build_server
 from tollgate.proxy.upstreams import Upstream
@@ -20,66 +28,6 @@ AWS_KEY = "AKIA" + "IOSFODNN7EXAMPLE"
 WRITE = call("write_file", path="notes.txt", content="new text")
 HARMLESS = decision()
 DESTRUCTIVE = decision(destructive=0.91)
-
-
-@pytest.fixture
-def audit(tmp_path):
-    with AuditStore(tmp_path / "audit.sqlite") as store:
-        yield store
-
-
-@pytest.fixture
-def approvals(tmp_path):
-    with ApprovalQueue(tmp_path / APPROVALS_FILE, poll_seconds=0.01) as queue:
-        yield queue
-
-
-class Scene:
-    """A gate over one fake upstream, with handles on everything it touches."""
-
-    def __init__(self, audit, approvals, outcome, *, enforce=True, rules=None, cwd=None, delay=0.0):
-        self.upstream = FakeUpstream("write_file", "read_file", "delete_everything")
-        self.model = FakeDecisionModel(outcome, delay=delay)
-        self.audit = audit
-        self.approvals = approvals
-        self.gate = Gate(
-            ToolRouter({"files": self.upstream}),
-            self.model,
-            audit,
-            rules or policy(),
-            approvals if enforce else None,
-            enforce=enforce,
-            cwd=cwd,
-        )
-
-    def run(self, params):
-        return asyncio.run(asyncio.wait_for(self.gate.call_tool(params), 10))
-
-    def run_held(self, params, answer: bool | None):
-        """Make a call that gets held; answer it from a second connection, or leave it."""
-
-        async def scenario():
-            task = asyncio.create_task(self.gate.call_tool(params))
-            while not self.approvals.pending():
-                assert not task.done(), "the call finished without being held"
-                await asyncio.sleep(0.01)
-            [held] = self.approvals.pending()
-            forwarded_while_held = list(self.upstream.calls)
-            if answer is not None:
-                self.approvals.answer(held.id, approve=answer)
-            return held, forwarded_while_held, await asyncio.wait_for(task, 10)
-
-        return asyncio.run(scenario())
-
-    @property
-    def row(self):
-        [row] = self.audit.recent(10)
-        return row
-
-
-def refused(result) -> str:
-    assert result.is_error
-    return result.content[0].text
 
 
 # --- allow ---------------------------------------------------------------------------

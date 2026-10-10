@@ -1,12 +1,7 @@
 from fakes import tool
 
-from tollgate.decide.questions import (
-    RECENT_CONTEXT_META,
-    USER_REQUEST_META,
-    CallContext,
-    call_request,
-    context_from_meta,
-)
+from tollgate.context import RECENT_CONTEXT_META, USER_REQUEST_META, CallContext, context_from_meta
+from tollgate.decide.questions import call_request
 
 READ = tool("read_text_file", "Read a file as text.")
 

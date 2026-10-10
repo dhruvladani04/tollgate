@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": ["mcp__tollgate__*"],
+    "deny": ["Edit", "Write"]
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run tollgate-hook"
+          }
+        ]
+      }
+    ]
+  }
+}

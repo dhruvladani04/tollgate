@@ -13,10 +13,12 @@ from pathlib import Path
 import fake_upstream
 import pytest
 import yaml
-from mcp import Client, StdioServerParameters
+from mcp import Client, StdioServerParameters, types
+from mcp.client.stdio import stdio_client
 
 from tollgate.approve.queue import APPROVALS_FILE, ApprovalQueue
 from tollgate.audit.store import AuditStore
+from tollgate.prompts import PROMPTS_FILE
 
 FAKE = str(Path(__file__).with_name("fake_upstream.py"))
 SERVER = [sys.executable, "-m", "tollgate.proxy.server"]
@@ -267,3 +269,107 @@ def test_enforce_mode_holds_a_call_it_cannot_judge_until_the_approval_command_ap
     assert (refused.tool, refused.band, refused.action) == ("fail", "block", "blocked")
     assert (judged.tool, judged.band, judged.action) == ("echo", "ask", "forwarded")
     assert judged.error.startswith("timeout")
+
+
+def outage_policy(directory: Path) -> Path:
+    """The example policy with one millisecond for the model, so every call is held."""
+    rules = yaml.safe_load(EXAMPLE_POLICY.read_text(encoding="utf-8"))
+    rules["decision"]["timeout_ms"] = 1
+    rules["prefilter"]["allow_tools"] = []
+    rules["prefilter"]["path_sandbox"]["roots"] = []
+    policy_file = directory / "policy.yaml"
+    policy_file.write_text(yaml.safe_dump(rules), encoding="utf-8")
+    return policy_file
+
+
+def gated_tollgate(tmp_path: Path, *options: str) -> tuple[StdioServerParameters, Path]:
+    """Tollgate in front of the text fake, with a key that is never used; and its state folder."""
+    config = write_config(tmp_path, {"text": stdio_upstream("text")})
+    state = tmp_path / "state"
+    parameters = StdioServerParameters(
+        command=SERVER[0],
+        args=[
+            *SERVER[1:],
+            "--upstreams",
+            str(config),
+            "--policy",
+            str(outage_policy(tmp_path)),
+            "--state-dir",
+            str(state),
+            *options,
+        ],
+        env={"TYPESAFE_API_KEY": "not-a-real-key"},
+    )
+    return parameters, state
+
+
+@pytest.mark.parametrize(
+    ("mode", "by_round_trip"),
+    [("legacy", False), ("auto", True)],
+    ids=["older-protocol", "2026-07-28"],
+)
+def test_a_client_that_can_ask_its_user_approves_a_held_call_in_place(
+    tmp_path, mode, by_round_trip
+):
+    tollgate, state = gated_tollgate(tmp_path)
+    asked = []
+
+    async def person(context, params):
+        asked.append(params.message)
+        return types.ElicitResult(action="accept")
+
+    async def scenario():
+        with (tmp_path / "tollgate.log").open("w", encoding="utf-8") as log_file:
+            client = Client(
+                stdio_client(tollgate, errlog=log_file),
+                cache=None,
+                mode=mode,
+                elicitation_callback=person,
+            )
+            async with client:
+                return await client.call_tool("echo", {"text": "hello"})
+
+    result = asyncio.run(asyncio.wait_for(scenario(), TIMEOUT_SECONDS))
+
+    assert not result.is_error
+    assert result.content[0].text == "hello"
+    assert len(asked) == 1
+    assert "Tool: echo (from text)" in asked[0]
+    log = (tmp_path / "tollgate.log").read_text(encoding="utf-8")
+    assert "asking the client's user about held call #1" in log
+    assert ("held call #1 by round trip" in log) is by_round_trip
+    with ApprovalQueue(state / APPROVALS_FILE) as queue:
+        assert queue.get(1).status == "approved"
+    with AuditStore(state / "audit.sqlite") as audit:
+        [row] = audit.recent(10)
+    assert (row.tool, row.band, row.action) == ("echo", "ask", "forwarded")
+
+
+def test_the_hook_command_tells_a_running_tollgate_what_the_user_asked(tmp_path):
+    tollgate, state = gated_tollgate(tmp_path, "--mode", "observe")
+    event = {
+        "hook_event_name": "UserPromptSubmit",
+        "session_id": "session-1",
+        "cwd": str(tmp_path),
+        "prompt": "Say hello back to me",
+    }
+
+    async def scenario():
+        async with Client(tollgate, cache=None) as client:
+            hook = await asyncio.to_thread(
+                subprocess.run,
+                [sys.executable, "-m", "tollgate.prompts", "--state-dir", str(state)],
+                input=json.dumps(event).encode("utf-8"),
+                capture_output=True,
+                timeout=TIMEOUT_SECONDS,
+            )
+            return hook, await client.call_tool("echo", {"text": "hello"})
+
+    hook, result = asyncio.run(asyncio.wait_for(scenario(), TIMEOUT_SECONDS))
+
+    assert (hook.returncode, hook.stdout) == (0, b"")
+    assert (state / PROMPTS_FILE).exists()
+    assert result.content[0].text == "hello"
+    with AuditStore(state / "audit.sqlite") as audit:
+        [row] = audit.recent(10)
+    assert row.user_request == "Say hello back to me"

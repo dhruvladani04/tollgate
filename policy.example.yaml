@@ -9,6 +9,11 @@ decision:
   timeout_ms: 800
   max_retries: 2
 
+context:
+  # The user's request and each earlier turn are cut to this many characters before
+  # they are sent to the model. The start and the end are kept.
+  max_chars: 2000
+
 thresholds:
   # `risk` is a score from 0 (read-only) to 3 (destroys data, spends money or
   # sends data to a third party).

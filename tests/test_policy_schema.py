@@ -36,6 +36,7 @@ def test_the_example_policy_holds_the_starting_values_from_the_spec():
         ("thresholds", "destructive"),
         ("thresholds", "confidence"),
         ("decision", "timeout_ms"),
+        ("context", "max_chars"),
         ("prefilter", "max_argument_bytes"),
         ("approval", "timeout_seconds"),
     ],
@@ -49,7 +50,7 @@ def test_a_policy_that_leaves_out_a_number_is_rejected(document, missing):
         parse_policy(document)
 
 
-@pytest.mark.parametrize("section", ["decision", "thresholds", "prefilter", "approval"])
+@pytest.mark.parametrize("section", ["decision", "context", "thresholds", "prefilter", "approval"])
 def test_a_policy_that_leaves_out_a_section_is_rejected(document, section):
     del document[section]
 
