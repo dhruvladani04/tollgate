@@ -19,6 +19,7 @@ def test_the_example_policy_holds_the_starting_values_from_the_spec():
 
     assert policy.decision.timeout_ms == 800
     assert policy.thresholds.risk_ask == 1.0
+    assert policy.thresholds.risk_ask_off_task == 0.5
     assert policy.thresholds.risk_block == 2.2
     assert policy.thresholds.confidence == 0.5
     assert {
@@ -34,6 +35,7 @@ def test_the_example_policy_holds_the_starting_values_from_the_spec():
     "missing",
     [
         ("thresholds", "destructive"),
+        ("thresholds", "risk_ask_off_task"),
         ("thresholds", "confidence"),
         ("decision", "timeout_ms"),
         ("context", "max_chars"),
@@ -64,11 +66,25 @@ def test_a_policy_that_leaves_out_a_section_is_rejected(document, section):
         ("thresholds", "destructive", 1.5, "thresholds.destructive"),
         ("thresholds", "risk_ask", 4, "thresholds.risk_ask"),
         ("thresholds", "risk_ask", 2.5, "risk_ask must not be above risk_block"),
+        (
+            "thresholds",
+            "risk_ask_off_task",
+            1.5,
+            "risk_ask_off_task must not be above risk_ask",
+        ),
         ("decision", "timeout_ms", 0, "decision.timeout_ms"),
         ("approval", "timeout_seconds", -1, "approval.timeout_seconds"),
         ("thresholds", "typo", 0.5, "thresholds.typo"),
     ],
-    ids=["probability>1", "risk>3", "ask>block", "zero-timeout", "negative", "unknown-key"],
+    ids=[
+        "probability>1",
+        "risk>3",
+        "ask>block",
+        "off-task-ask>ask",
+        "zero-timeout",
+        "negative",
+        "unknown-key",
+    ],
 )
 def test_out_of_range_and_unknown_values_are_rejected(document, section, field, value, message):
     document[section][field] = value
@@ -85,10 +101,15 @@ def test_a_secret_pattern_that_is_not_a_regular_expression_is_rejected(document)
 
 
 def test_a_tool_override_changes_only_the_thresholds_it_names(document):
-    document["tools"] = {"write_file": {"thresholds": {"destructive": 0.3}}}
+    document["tools"] = {
+        "write_file": {"thresholds": {"destructive": 0.3}},
+        "send_email": {"thresholds": {"risk_ask_off_task": 0.2}},
+    }
 
     policy = parse_policy(document)
 
+    assert policy.thresholds_for("send_email").risk_ask_off_task == 0.2
+    assert policy.thresholds_for("write_file").risk_ask_off_task == 0.5
     assert policy.thresholds_for("write_file").destructive == 0.3
     assert policy.thresholds_for("write_file").risk_ask == 1.0
     assert policy.thresholds_for("read_text_file") == policy.thresholds
@@ -98,6 +119,11 @@ def test_a_tool_override_that_breaks_the_thresholds_is_rejected(document):
     document["tools"] = {"write_file": {"thresholds": {"risk_ask": 3.0}}}
 
     with pytest.raises(PolicyError, match="risk_ask must not be above risk_block"):
+        parse_policy(document)
+
+    document["tools"] = {"write_file": {"thresholds": {"risk_ask": 0.2}}}
+
+    with pytest.raises(PolicyError, match="risk_ask_off_task must not be above risk_ask"):
         parse_policy(document)
 
 

@@ -38,6 +38,10 @@ class _Section(BaseModel):
 class Thresholds(_Section):
     risk_ask: RiskScore
     """A risk score at or above this holds the call for a person."""
+    risk_ask_off_task: RiskScore
+    """A risk score at or above this holds a call that is not known to serve the user's
+    request: one that is off task, or one made with no user request. Equal to
+    `risk_ask`, it changes nothing."""
     risk_block: RiskScore
     """A risk score above this blocks the call when it is also off task."""
     destructive: Probability
@@ -50,14 +54,17 @@ class Thresholds(_Section):
     """An answer less confident than this is escalated instead of acted on."""
 
     @model_validator(mode="after")
-    def _ask_level_is_not_above_block_level(self) -> Self:
+    def _risk_levels_are_in_order(self) -> Self:
         if self.risk_ask > self.risk_block:
             raise ValueError("risk_ask must not be above risk_block")
+        if self.risk_ask_off_task > self.risk_ask:
+            raise ValueError("risk_ask_off_task must not be above risk_ask")
         return self
 
 
 class ThresholdOverrides(_Section):
     risk_ask: RiskScore | None = None
+    risk_ask_off_task: RiskScore | None = None
     risk_block: RiskScore | None = None
     destructive: Probability | None = None
     exfiltration: Probability | None = None

@@ -116,9 +116,14 @@ or email.
 | Band | When | What Tollgate does |
 | --- | --- | --- |
 | Allow | Low risk, and no answer over its threshold | Forwards the call |
-| Ask | Risky or destructive | Holds the call for a person |
+| Ask | Risky or destructive, or a smaller change that is not known to serve the user's request | Holds the call for a person |
 | Block | Sends data where the request never named, or high risk and off task | Refuses the call and tells the agent why |
 | Escalate | An answer that matters is uncertain | Holds the call for a person; a second model will judge these later |
+
+**A call nobody asked for is held sooner.** The policy has two risk levels for asking.
+`risk_ask` applies to every call. The lower one, `risk_ask_off_task`, applies when the
+model judges the call off task, or when Tollgate was not told what the user asked for. So
+an edit the user asked for can run, while the same edit made unprompted is held.
 
 If the model does not answer in time, or fails, the call is held for a person. It is never
 allowed by default.
@@ -134,16 +139,23 @@ out of tuning:
 | Configuration | Risky calls caught | Benign calls held | Malicious calls blocked |
 | --- | --- | --- | --- |
 | Exact checks only, no model | 11.9% | 1.1% | 13.8% |
-| Jev at the starting thresholds | 94.1% | 28.7% | 56.9% |
-| Jev at tuned thresholds | 92.6% | 28.7% | 77.6% |
+| Jev at the starting thresholds | 97.0% | 28.7% | 56.9% |
+| Jev at tuned thresholds | 93.3% | 7.4% | 87.9% |
 
+- **Which thresholds ship.** The example policy holds the starting thresholds. The tuned
+  ones are listed in the results and are not the default yet. On a second test set, derived
+  from the InjecAgent benchmark, 62.8% of the calls they blocked were truly malicious,
+  against 100% at the starting thresholds, and a blocked call cannot be approved by a
+  person.
+- **Without the user's request,** the tuned gate caught 95.6% of risky calls and held
+  30.9% of benign ones. It cannot tell an edit the user asked for from one nobody asked
+  for, so it holds both.
 - **Speed and cost.** A decision took a median of 321 ms (416 ms at the 95th percentile)
   and costs about $0.022 per 1,000 calls.
-- **Where the unnecessary holds come from.** Of the 27 benign calls the tuned gate held,
-  26 were easy-to-undo changes the user had asked for. The current rules treat such a
-  change the same whether or not it was asked for, so tuning thresholds does not fix it.
 - **Limits.** The test calls were written for this project and may be easier than real
-  traffic. No case tries to talk the model into a wrong answer.
+  traffic. No case tries to talk the model into a wrong answer. The rule that holds
+  unrequested calls sooner was added after seeing test results, so the tuned row is likely
+  optimistic.
 
 [docs/results.md](docs/results.md) has the full tables, a second test set derived from the
 InjecAgent benchmark, calibration, stability and the method. It is generated from Jev's
@@ -191,7 +203,8 @@ MCP sends a server the tool name and the arguments, and nothing about the conver
 Two of Tollgate's four questions need the user's request: whether the call serves it, and
 whether the call sends data somewhere the request never named. Without the request,
 Tollgate asks only how risky the call is and whether it destroys data, so it can allow or
-hold a call but has no grounds to block one.
+hold a call but has no grounds to block one. It also holds calls from the lower risk level,
+because nothing shows that a call serves the user.
 
 There are two ways to give Tollgate the request.
 

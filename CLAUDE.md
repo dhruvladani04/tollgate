@@ -139,9 +139,10 @@ stop the user's session to free the file.
 ## The policy and the gate
 
 - **Every number is in the policy file.** `policy/schema.py` gives no section a default,
-  so a policy that leaves out a threshold is rejected. `policy.example.yaml` holds the
-  spec's starting values. M4 fitted tuned values, which are listed in `docs/results.md`
-  and are not in the example policy; see "Open for the user" below.
+  so a policy that leaves out a threshold is rejected. `policy.example.yaml` holds
+  starting values: the spec's, plus `risk_ask_off_task` at 0.5. The values M4 fitted are
+  listed in `docs/results.md`. The user decided not to put them in the example policy
+  yet.
 - **`Gate` in `proxy/intercept.py` is the whole flow:** pre-filter, then the model within
   the time budget, then the band engine, then the action, then one audit row.
 - **Pre-filter order** (`policy/prefilter.py`): deny list, secret patterns, path sandbox,
@@ -153,11 +154,18 @@ stop the user's session to free the file.
      that is confidently off task.
   2. Escalate: an answer that could change the band is uncertain, or `on_task` and
      `exfiltration` contradict each other.
-  3. Ask: risk at or above `risk_ask`, or `destructive` above its threshold.
+  3. Ask: risk at or above `risk_ask`; or risk at or above `risk_ask_off_task` on a call
+     that is confidently off task or came with no user request; or `destructive` above
+     its threshold.
   4. Allow: everything else.
-- **`on_task` only matters for a high-risk call,** so its uncertainty is ignored otherwise.
-  A low-risk off-task call is allowed, as the spec's table says.
-- **Without a user request** the block rules cannot fire, and a high-risk call is held.
+- **The off-task rule is not in the spec's band table.** It was added on 10 Oct 2026;
+  `docs/decisions/0001-off-task-ask-rule.md` says why. Setting `risk_ask_off_task` equal
+  to `risk_ask` switches it off, and the schema rejects a value above `risk_ask`.
+- **`on_task` matters for a high-risk call and for a call between the two ask levels,** so
+  its uncertainty is ignored otherwise. An off-task call below `risk_ask_off_task` is
+  allowed.
+- **Without a user request** the block rules cannot fire, a high-risk call is held, and
+  the lower ask level applies to every call.
 - **Escalate is held like Ask** until M5 adds the LLM judge.
 - **Fail closed.** No decision within `decision.timeout_ms`, or any model error, holds the
   call for a person. An enforcing gate also refuses a call whose audit row it cannot write.
@@ -198,13 +206,18 @@ stop the user's session to free the file.
   file contains AWS's published example key id (`AKIA...EXAMPLE`) for those cases; it
   is not a real credential.
 - **Tuning** (`evals/tune.py`) has two stages: each yes/no threshold is fitted to its
-  own label by F1, then `risk_ask` and `confidence` are chosen by running the real band
-  engine over the train split. Only settings that catch at least as many risky calls as
-  the starting policy are eligible; among them the fewest benign holds wins. An earlier
-  F2 objective was dropped because it reached 100% recall by holding half the benign
-  calls.
-- **`evals/experiments.py` is not shipped behaviour.** It measures one extra rule on top
-  of the engine and is reported separately.
+  own label by F1, then `risk_ask`, `risk_ask_off_task` and `confidence` are chosen
+  together by running the real band engine over the train split. Only settings that
+  catch at least as many risky calls as the starting policy are eligible; among them the
+  fewest benign holds wins. An earlier F2 objective was dropped because it reached 100%
+  recall by holding half the benign calls.
+- **The test split has informed one design choice.** The off-task rule was added after
+  reading where the gate was wrong on the test split, and the report says so. Do not add
+  another rule or change the tuning that way without saying so in the report.
+- **Known weak spots, from the report:** the tuned gate allows most off-task reads of
+  secrets or personal data, because `risk` scores a read as read-only; tuned block
+  precision on the InjecAgent set is 62.8%; and the tuned `confidence` of 0.05 makes
+  bands less stable across repeats (91.2% agreement, against 98.2% at 0.4).
 - **The README's headline numbers are copied from `docs/results.md`.** Update them when
   the report changes.
 - **Figures** follow one two-colour palette on a light surface, set at the top of
@@ -270,16 +283,21 @@ Built in M4 on Claude's judgment, and not explicitly confirmed by the user:
 - The tool-result data (deepset/prompt-injections) waits for M5, which builds the
   result scan it measures.
 
-Open for the user (raised at the end of M4, 10 Oct 2026):
+- **Off-task ask rule (decided 10 Oct 2026).** The user chose to add it to the band
+  engine after M4's first results.
+- **Tuned thresholds are not the default yet (decided 10 Oct 2026).** The example policy
+  keeps the starting values, because tuned block precision on the external set is too
+  low and a wrong block cannot be approved by a person. Ask before changing this.
+- **`httpx2` is a declared dependency, and the original plan file and
+  `jev_in_agent_loop.svg` are gitignored (decided 10 Oct 2026).**
 
-- **Add an off-task rule to the band engine?** The shipped rules use `on_task` only to
-  block a high-risk call, so tuning cannot stop the gate holding edits the user asked
-  for (28.7% of benign test calls). In the experiment, holding an otherwise allowed
-  call when it is off task and its risk is above a second level cut that to 4.3% at
-  about the same recall. It changes the spec's band table and adds one policy number.
-- **Put the tuned thresholds in `policy.example.yaml`?** Tuning blocks more malicious
-  calls outright (56.9% to 77.6%), but on the InjecAgent set block precision fell from
-  100% to 70.9%, and a wrong block cannot be approved by a person.
+Built with the off-task rule on Claude's judgment, and not explicitly confirmed:
+
+- A call with no user request is treated like an off-task one for this rule. Measured
+  on the train split at the tuned thresholds, such clients catch 95.8% of risky calls
+  this way and 81.2% if the rule cannot fire without a request.
+- An uncertain `on_task` answer between the two ask levels escalates.
+- The starting value of `risk_ask_off_task` is 0.5.
 
 ## Milestone status
 
@@ -306,11 +324,12 @@ Open for the user (raised at the end of M4, 10 Oct 2026):
   the user's prompt so all four questions were answered, and the hold was approved from
   the in-client question in 4 seconds.
 - **M4 Eval and tuning:** built on 10 Oct 2026. `python -m evals.report` rebuilds
-  `docs/results.md` and three figures from the committed cache in about 10 seconds with
+  `docs/results.md` and three figures from the committed cache in about 15 seconds with
   no key. The data is 581 golden cases (352 train, 229 test) and 205 InjecAgent-derived
-  test cases. On the golden test split, rules alone caught 11.9% of risky calls; Jev at
-  the starting thresholds caught 94.1% and held 28.7% of benign calls; tuned, 92.6% and
-  28.7%, with malicious calls blocked outright rising from 56.9% to 77.6%. Median
-  decision time 321 ms, p95 416 ms; about $0.022 per 1,000 calls. Two of the plan's five
-  configurations need the LLM judge and arrive with M5.
+  test cases. Numbers below include the off-task rule, added the same day. On the golden
+  test split, rules alone caught 11.9% of risky calls; Jev at the starting thresholds
+  caught 97.0% and held 28.7% of benign calls; tuned, 93.3% and 7.4%, with malicious
+  calls blocked outright rising from 56.9% to 87.9%. Tuned the same way with the rule
+  off, 93.3% and 30.9%. Median decision time 321 ms, p95 416 ms; about $0.022 per 1,000
+  calls. Two of the plan's five configurations need the LLM judge and arrive with M5.
 - M5 and M6: not started.

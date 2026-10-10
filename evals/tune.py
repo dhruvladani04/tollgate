@@ -9,16 +9,17 @@ The fit has two stages.
    label on the training cases: `destructive`, `exfiltration`, and `on_task`
    (as a detector of off-task calls). `risk_block` is the score threshold that
    best separates calls that are hard to undo or worse from the rest.
-2. Two numbers have no label of their own, because they only mean something in
-   combination: `risk_ask` and `confidence`. They are chosen by running the
-   real band engine over the training cases. Among the settings that catch at
-   least as many risky calls as the starting policy does, the one with the
-   fewest unnecessary holds wins; ties go to the one that blocks more of the
-   malicious calls outright.
+2. Three numbers have no label of their own, because they only mean something
+   in combination: `risk_ask`, `risk_ask_off_task` and `confidence`. They are
+   chosen together by running the real band engine over the training cases.
+   Among the settings that catch at least as many risky calls as the starting
+   policy does, the one with the fewest unnecessary holds wins; ties go to the
+   one that blocks more of the malicious calls outright.
 
 So tuning is never allowed to buy fewer questions with weaker detection.
 """
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from evals.data import (
@@ -41,6 +42,8 @@ from tollgate.policy.schema import RISK_TOP, Policy, Thresholds
 
 PROBABILITIES = [step / 100 for step in range(1, 100)]
 RISK_SCORES = [step / 20 for step in range(int(RISK_TOP * 20) + 1)]
+# The two ask levels are searched together, so they use a coarser grid.
+ASK_LEVELS = RISK_SCORES[::2]
 CONFIDENCES = [step / 20 for step in range(20)]
 # The label that "high risk" is fitted against: hard to undo, or worse.
 HIGH_RISK_LEVEL = 2
@@ -139,49 +142,73 @@ def fit_question_thresholds(train: list[Sample], start: Thresholds) -> dict[str,
     scores, labels = column(train, "risk")
     fitted["risk_block"] = best_threshold(scores, labels, candidates=RISK_SCORES)
     fitted["risk_ask"] = min(fitted["risk_ask"], fitted["risk_block"])
+    fitted["risk_ask_off_task"] = min(fitted["risk_ask_off_task"], fitted["risk_ask"])
     return fitted
 
 
-def tune(train: list[Sample], start: Thresholds) -> Thresholds:
+def ask_settings(fitted: dict[str, float], off_task_rule: bool = True) -> Iterator[Thresholds]:
+    """Stage 2's candidates: every combination of the numbers that have no label.
+
+    Without `off_task_rule` the two ask levels are kept equal, which switches
+    the off-task rule off.
+    """
+    for risk_ask in ASK_LEVELS:
+        if risk_ask > fitted["risk_block"]:
+            break
+        lower_levels = (
+            [level for level in ASK_LEVELS if level <= risk_ask] if off_task_rule else [risk_ask]
+        )
+        for off_task in lower_levels:
+            for confidence in CONFIDENCES:
+                yield Thresholds.model_validate(
+                    fitted
+                    | {
+                        "risk_ask": risk_ask,
+                        "risk_ask_off_task": off_task,
+                        "confidence": confidence,
+                    }
+                )
+
+
+def tune(train: list[Sample], start: Thresholds, off_task_rule: bool = True) -> Thresholds:
     """Fit every threshold on the training samples, starting from `start`."""
     fitted = fit_question_thresholds(train, start)
     floor = outcome(train, bands(train, start)).recall_on_risky
 
-    best: tuple[tuple[float, float, float, float], dict[str, float]] | None = None
-    for risk_ask in RISK_SCORES:
-        if risk_ask > fitted["risk_block"]:
-            break
-        for confidence in CONFIDENCES:
-            candidate = fitted | {"risk_ask": risk_ask, "confidence": confidence}
-            result = outcome(train, bands(train, Thresholds.model_validate(candidate)))
-            if result.recall_on_risky < floor:
-                continue
-            # Fewest unnecessary holds, then most malicious calls blocked; after that,
-            # the least intrusive setting.
-            rank = (result.false_ask_rate, -result.block_recall, -risk_ask, confidence)
-            if best is None or rank < best[0]:
-                best = (rank, candidate)
-    return Thresholds.model_validate(best[1] if best is not None else fitted)
+    best: tuple[tuple[float, ...], Thresholds] | None = None
+    for candidate in ask_settings(fitted, off_task_rule):
+        result = outcome(train, bands(train, candidate))
+        if result.recall_on_risky < floor:
+            continue
+        # Fewest unnecessary holds, then most malicious calls blocked; after that,
+        # the least intrusive setting.
+        rank = (
+            result.false_ask_rate,
+            -result.block_recall,
+            -candidate.risk_ask,
+            -candidate.risk_ask_off_task,
+            candidate.confidence,
+        )
+        if best is None or rank < best[0]:
+            best = (rank, candidate)
+    return best[1] if best is not None else Thresholds.model_validate(fitted)
 
 
-def fitted_policies() -> tuple[Policy, Policy, Policy]:
-    """The start policy, the policy tuned with user requests, and the one tuned without."""
+def fitted_policies() -> tuple[Policy, Policy]:
+    """The start policy and the policy tuned on the training split."""
     start = start_policy()
-    cache = DecisionCache(CACHE)
     train = [case for case in load_cases(GOLDEN) if case["split"] == "train"]
-    with_request = tune(load_samples(train, cache, start, True), start.thresholds)
-    without_request = tune(load_samples(train, cache, start, False), start.thresholds)
-    return start, with_thresholds(start, with_request), with_thresholds(start, without_request)
+    samples = load_samples(train, DecisionCache(CACHE), start, with_user_request=True)
+    return start, with_thresholds(start, tune(samples, start.thresholds))
 
 
 def main() -> None:
-    start, tuned, tuned_without = fitted_policies()
-    print(f"{'threshold':<14}{'start':>8}{'tuned':>8}{'tuned, no request':>20}")
+    start, tuned = fitted_policies()
+    print(f"{'threshold':<20}{'start':>8}{'tuned':>8}")
     for name in Thresholds.model_fields:
         print(
-            f"{name:<14}{getattr(start.thresholds, name):>8.2f}"
+            f"{name:<20}{getattr(start.thresholds, name):>8.2f}"
             f"{getattr(tuned.thresholds, name):>8.2f}"
-            f"{getattr(tuned_without.thresholds, name):>20.2f}"
         )
 
 

@@ -48,7 +48,8 @@ def decide_band(answers: Mapping[str, Answer], thresholds: Thresholds) -> Verdic
     """Pick the band for a call from the model's answers.
 
     `on_task` and `exfiltration` are absent when the client sent no user request.
-    The rules that need them then cannot fire, and a high-risk call is held.
+    The block rules then cannot fire, and a high-risk call is held. Nothing shows
+    that such a call serves the user, so the lower ask level applies to it.
     """
     t = thresholds
     risk = answers.get("risk")
@@ -62,12 +63,14 @@ def decide_band(answers: Mapping[str, Answer], thresholds: Thresholds) -> Verdic
         return confidence(answer) < t.confidence
 
     high_risk = risk.score > t.risk_block
-    # `on_task` only decides anything for a high-risk call, so its uncertainty
-    # is ignored otherwise.
+    # Between the two ask levels a call runs only if it is known to be on task.
+    between_ask_levels = t.risk_ask_off_task <= risk.score < t.risk_ask
+    # `on_task` decides something only for a high-risk call and between the ask
+    # levels, so its uncertainty is ignored otherwise.
     decisive: dict[str, Answer] = {"risk": risk, "destructive": destructive}
     if isinstance(exfiltration, NoulAnswer):
         decisive["exfiltration"] = exfiltration
-    if isinstance(on_task, NoulAnswer) and high_risk:
+    if isinstance(on_task, NoulAnswer) and (high_risk or between_ask_levels):
         decisive["on_task"] = on_task
     uncertain = [name for name, answer in decisive.items() if unsure(answer)]
 
@@ -110,6 +113,16 @@ def decide_band(answers: Mapping[str, Answer], thresholds: Thresholds) -> Verdic
     ask = []
     if risk.score >= t.risk_ask:
         ask.append(f"risk {risk.score:.2f} is at or above {t.risk_ask:.2f}")
+    elif between_ask_levels and off_the_task:
+        ask.append(
+            f"off task with risk {risk.score:.2f} at or above {t.risk_ask_off_task:.2f} "
+            f"(on_task {on_task.probability:.2f} is below {t.on_task:.2f})"
+        )
+    elif between_ask_levels and not isinstance(on_task, NoulAnswer):
+        ask.append(
+            f"the user's request is unknown and risk {risk.score:.2f} is at or above "
+            f"{t.risk_ask_off_task:.2f}"
+        )
     if destructive.probability > t.destructive:
         ask.append(
             f"destructive: the call deletes or overwrites data "

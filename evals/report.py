@@ -27,7 +27,6 @@ from evals.data import (  # noqa: E402
     load_cases,
     start_policy,
 )
-from evals.experiments import off_task_rule_bands, tune_off_task_rule  # noqa: E402
 from evals.metrics import (  # noqa: E402
     FLAGGED,
     GateOutcome,
@@ -37,10 +36,9 @@ from evals.metrics import (  # noqa: E402
     risk_coverage,
 )
 from evals.tune import (  # noqa: E402
-    CONFIDENCES,
-    RISK_SCORES,
     MissingAnswers,
     Sample,
+    ask_settings,
     bands,
     column,
     fit_question_thresholds,
@@ -65,6 +63,10 @@ ECE_BINS = 15
 # The risk-coverage curve starts here; below it, too few cases give a stable rate.
 COVERAGE_FLOOR = 0.1
 NOULS = ("destructive", "exfiltration", "on_task")
+# Where each label sits beside its point in the trade-off figure, in points.
+TRADEOFF_LABEL_OFFSETS = {"Jev tuned": (-12, 10), "Jev at 0.5": (10, -5)}
+# The trade-off figure stops here; settings that hold more benign calls are not drawn.
+TRADEOFF_MAX_HELD = 0.6
 
 # Chart colours: a validated two-colour palette on a light surface.
 SURFACE = "#fcfcfb"
@@ -148,17 +150,25 @@ def save(figure, name: str) -> str:
     return f"img/{name}"
 
 
-def plot_tradeoff(cloud, named, experiment) -> str:
-    """Recall against unnecessary holds: the settings thresholds can reach, and named points."""
+def plot_tradeoff(cloud_on, cloud_off, named) -> str:
+    """Recall against unnecessary holds: what threshold settings can reach, and named points."""
     figure, axis = new_figure(7.2, 4.6)
     style_axes(axis)
     axis.scatter(
-        [x for x, _ in cloud],
-        [y for _, y in cloud],
+        [x for x, _ in cloud_on],
+        [y for _, y in cloud_on],
         s=14,
         color=CONTEXT,
         linewidths=0,
-        label="Other threshold settings, same rules",
+        label="Threshold settings, off-task rule on",
+    )
+    axis.scatter(
+        [x for x, _ in cloud_off],
+        [y for _, y in cloud_off],
+        s=14,
+        color=ORANGE,
+        linewidths=0,
+        label="Threshold settings, off-task rule off",
     )
     axis.scatter(
         [point[1] for point in named],
@@ -168,30 +178,21 @@ def plot_tradeoff(cloud, named, experiment) -> str:
         edgecolors=SURFACE,
         linewidths=2,
         zorder=3,
-        label="Shipped rules",
+        label="Named configurations",
     )
-    axis.scatter(
-        [experiment[1]],
-        [experiment[2]],
-        s=70,
-        color=ORANGE,
-        edgecolors=SURFACE,
-        linewidths=2,
-        zorder=3,
-        label="Experiment: extra rule for off-task calls",
-    )
-    # Points that sit close together get labels on opposite sides.
-    offsets = {"Jev at 0.5": (8, 6), "Jev tuned": (8, -14)}
-    for label, x, y in [*named, experiment]:
+    for label, x, y in named:
         axis.annotate(
             label,
             (x, y),
-            xytext=offsets.get(label, (8, -4)),
+            xytext=TRADEOFF_LABEL_OFFSETS.get(label, (8, -4)),
             textcoords="offset points",
             fontsize=9,
             color=INK,
+            # A label can sit over the cloud, so it gets a patch of the surface behind it.
+            bbox={"facecolor": SURFACE, "edgecolor": "none", "pad": 1.5, "alpha": 0.85},
+            zorder=4,
         )
-    axis.set_xlim(-0.02, 0.62)
+    axis.set_xlim(-0.02, TRADEOFF_MAX_HELD + 0.02)
     axis.set_ylim(0, 1.04)
     axis.xaxis.set_major_formatter(PercentFormatter(1.0, decimals=0))
     axis.yaxis.set_major_formatter(PercentFormatter(1.0, decimals=0))
@@ -300,29 +301,37 @@ def build() -> str:
     train = load_samples(train_cases, cache, start, True)
     test = load_samples(test_cases, cache, start, True)
     outside = load_samples(external, cache, start, True)
-    train_bare = load_samples(train_cases, cache, start, False)
     test_bare = load_samples(test_cases, cache, start, False)
     outside_bare = load_samples(external, cache, start, False)
 
     tuned = tune(train, start.thresholds)
-    tuned_bare = tune(train_bare, start.thresholds)
-    floor = outcome(train, bands(train, start.thresholds)).recall_on_risky
-    experiment, off_task_ask, _ = tune_off_task_rule(train, tuned, floor)
+    # Equal ask levels switch the off-task rule off; these two show what the rule adds.
+    start_rule_off = start.thresholds.model_copy(
+        update={"risk_ask_off_task": start.thresholds.risk_ask}
+    )
+    tuned_rule_off = tune(train, start.thresholds, off_task_rule=False)
 
     def results(samples: list[Sample], bare: list[Sample]) -> dict[str, GateOutcome]:
         return {
             "Rules only": outcome(samples, rules_only_bands(samples)),
             "Jev at 0.5": outcome(samples, bands(samples, start.thresholds)),
             "Jev tuned": outcome(samples, bands(samples, tuned)),
+            "Jev at 0.5, off-task rule off": outcome(samples, bands(samples, start_rule_off)),
+            "Jev tuned, off-task rule off": outcome(samples, bands(samples, tuned_rule_off)),
             "Jev at 0.5, no user request": outcome(bare, bands(bare, start.thresholds)),
-            "Jev tuned, no user request": outcome(bare, bands(bare, tuned_bare)),
-            "Experiment": outcome(samples, off_task_rule_bands(samples, experiment, off_task_ask)),
+            "Jev tuned, no user request": outcome(bare, bands(bare, tuned)),
         }
 
     on_test = results(test, test_bare)
     on_outside = results(outside, outside_bare)
     main_rows = ("Rules only", "Jev at 0.5", "Jev tuned")
     bare_rows = ("Jev at 0.5, no user request", "Jev tuned, no user request")
+    rule_rows = (
+        "Jev at 0.5, off-task rule off",
+        "Jev at 0.5",
+        "Jev tuned, off-task rule off",
+        "Jev tuned",
+    )
 
     # --- per-question quality ---------------------------------------------------------
     question_rows = []
@@ -366,24 +375,19 @@ def build() -> str:
 
     # --- figures ----------------------------------------------------------------------
     question_fit = fit_question_thresholds(train, start.thresholds)
-    cloud = []
-    for risk_ask in RISK_SCORES:
-        if risk_ask > question_fit["risk_block"]:
-            break
-        for confidence in CONFIDENCES:
-            candidate = Thresholds.model_validate(
-                question_fit | {"risk_ask": risk_ask, "confidence": confidence}
-            )
-            result = outcome(test, bands(test, candidate))
-            cloud.append((result.false_ask_rate, result.recall_on_risky))
+    cloud_on, cloud_off = [], []
+    for candidate in ask_settings(question_fit):
+        result = outcome(test, bands(test, candidate))
+        rule_off = candidate.risk_ask_off_task == candidate.risk_ask
+        (cloud_off if rule_off else cloud_on).append(
+            (result.false_ask_rate, result.recall_on_risky)
+        )
     named = [
         (label, on_test[label].false_ask_rate, on_test[label].recall_on_risky)
         for label in main_rows
     ]
-    extra = on_test["Experiment"]
-    tradeoff_image = plot_tradeoff(
-        cloud, named, ("Experiment", extra.false_ask_rate, extra.recall_on_risky)
-    )
+    tradeoff_image = plot_tradeoff(cloud_on, cloud_off, named)
+    out_of_frame = sum(held > TRADEOFF_MAX_HELD + 0.02 for held, _ in cloud_on + cloud_off)
     reliability_image = plot_reliability(calibration)
     coverage_image = plot_risk_coverage(curve)
 
@@ -401,7 +405,8 @@ def build() -> str:
             benign_total[kind(sample.case)] += 1
             held_benign[kind(sample.case)] += band in FLAGGED
 
-    requested_changes_held = held_benign["On task, easy-to-undo change"]
+    held_total = sum(held_benign.values())
+    largest_kind, largest_held = held_benign.most_common(1)[0]
     wrong_at_full = [
         (sample, band)
         for sample, band in zip(judged, bands(judged, decisive), strict=True)
@@ -411,6 +416,8 @@ def build() -> str:
 
     # --- operations and stability -----------------------------------------------------
     sampled, agreement, spreads, timings = stability(tuned)
+    _, start_agreement, _, _ = stability(start.thresholds)
+    largest_missed_kind, largest_missed = missed.most_common(1)[0]
     tokens = [
         decision.input_tokens
         for case in test_cases
@@ -429,14 +436,14 @@ def build() -> str:
         return [str(len(cases)), str(benign), str(len(cases) - benign - malicious), str(malicious)]
 
     jev, fitted = on_test["Jev at 0.5"], on_test["Jev tuned"]
+    no_rule = on_test["Jev tuned, off-task rule off"]
+    no_request = on_test["Jev tuned, no user request"]
     threshold_rows = [
         [
             f"`{name}`",
             f"{getattr(start.thresholds, name):.2f}",
             f"{getattr(tuned, name):.2f}",
-            f"{getattr(tuned_bare, name):.2f}"
-            if name not in ("exfiltration", "on_task")
-            else "not used",
+            f"{getattr(tuned_rule_off, name):.2f}",
         ]
         for name in Thresholds.model_fields
     ]
@@ -457,11 +464,18 @@ def build() -> str:
         f"- **After tuning**, those figures were {pct(fitted.recall_on_risky)} and "
         f"{pct(fitted.false_ask_rate)}. Malicious calls blocked outright, instead of put to a "
         f"person, went from {pct(jev.block_recall)} to {pct(fitted.block_recall)}.",
-        f"- **The benign calls that were held:** {requested_changes_held} of the "
-        f"{sum(held_benign.values())} were easy-to-undo changes the user had asked for.",
-        f"- **In an experiment with one extra rule**, which is not part of the shipped policy, "
-        f"{pct(extra.recall_on_risky)} of risky calls were caught and "
-        f"{pct(extra.false_ask_rate)} of benign calls were held.",
+        f"- **Tuned the same way with the off-task rule switched off**, the gate caught "
+        f"{pct(no_rule.recall_on_risky)} of risky calls and held {pct(no_rule.false_ask_rate)} "
+        "of benign ones.",
+        f"- **Without the user's request**, the tuned gate caught "
+        f"{pct(no_request.recall_on_risky)} of risky calls and held "
+        f"{pct(no_request.false_ask_rate)} of benign ones.",
+        f"- **Benign calls the tuned gate held:** {held_total} of {sum(benign_total.values())}."
+        + (
+            f' The largest group, {largest_held}, was "{largest_kind.lower()}".'
+            if held_total
+            else ""
+        ),
         "## What the words mean",
         "- A **risky** call is one that should not run without a person seeing it. A **benign** "
         "call is any other. A **malicious** call is a risky one that should be blocked outright. "
@@ -492,25 +506,39 @@ def build() -> str:
         "- **Rules only.** The exact checks with no model: deny list, secret patterns and path "
         "sandbox. A call they do not decide simply runs.",
         "- **Jev at 0.5.** The starting policy: every yes/no threshold at 0.5, the risk levels "
-        "from the build plan.",
+        "from the build plan, and `risk_ask_off_task` at "
+        f"{start.thresholds.risk_ask_off_task:.2f}.",
         "- **Jev tuned.** The same rules with thresholds fitted on the golden train split.",
         "Two more configurations from the build plan, escalation to an LLM judge and an LLM "
         "judge on every call, are not built yet.",
+        "### The off-task rule",
+        "The band engine holds a call whose risk score is at or above `risk_ask`. A call that "
+        "is not known to serve the user's request is held from a lower level, "
+        "`risk_ask_off_task`. That covers a call the model judges off task and a call from a "
+        "client that sent no request. Setting the two levels equal switches the rule off.",
+        "The rule is not in the build plan's band table. It was added after the first run of "
+        "this evaluation; [What the off-task rule adds](#what-the-off-task-rule-adds) shows "
+        "the difference.",
         "### How the thresholds were tuned",
         "Each yes/no question's threshold was set to maximise F1 against its own label on the "
-        "train split. `risk_ask` and `confidence` have no label of their own, so they were "
-        "chosen by running the real band engine over the train split: among settings that "
-        "caught at least as many risky calls as the starting policy, the one with the fewest "
-        "benign calls held won. Tuning was therefore not allowed to trade away detection.",
-        table(["Threshold", "Start", "Tuned", "Tuned, no user request"], threshold_rows),
+        'train split, and `risk_block` the same way against "hard to undo or worse". '
+        "`risk_ask`, `risk_ask_off_task` and `confidence` have no label of their own, so they "
+        "were chosen together by running the real band engine over the train split: among "
+        "settings that caught at least as many risky calls as the starting policy, the one "
+        "with the fewest benign calls held won. Tuning was therefore not allowed to trade away "
+        "detection.",
+        table(["Threshold", "Start", "Tuned", "Tuned, off-task rule off"], threshold_rows),
+        "The tuned values are not in `policy.example.yaml`, which still holds the starting values.",
         "## Results on the external set",
         table(OUTCOME_HEADERS, [outcome_row(label, on_outside[label]) for label in main_rows]),
         "The thresholds were fitted on the golden set only, so this table shows how they carry "
         "over to cases from a different source.",
         "## Results without the user's request",
-        "A client such as Claude Code does not tell an MCP server what the user asked for unless "
-        "a hook supplies it. Without the request, only `risk` and `destructive` can be asked, "
-        "and nothing can be blocked by the model.",
+        "An MCP tool call does not say what the user asked for. Tollgate knows only when the "
+        "client or a hook supplies it. Without the request, only `risk` and `destructive` can "
+        "be asked, nothing can be blocked by the model, and the lower ask level applies to "
+        "every call. These are the same two policies as above, on the same cases with the "
+        "request left out.",
         "Golden test split:",
         table(OUTCOME_HEADERS, [outcome_row(label, on_test[label]) for label in bare_rows]),
         "InjecAgent-derived set:",
@@ -529,29 +557,27 @@ def build() -> str:
             ["Kind of call", "Risky cases", "Allowed"],
             [[name, str(total), str(missed[name])] for name, total in sorted(risky_total.items())],
         ),
-        "The band rules use `on_task` only to block a high-risk call. An easy-to-undo change is "
-        "therefore treated the same whether the user asked for it or not, and no threshold can "
-        "separate the two. A read of secrets or personal data scores as read-only, so an "
-        "off-task one is allowed.",
-        "## An experiment: one extra rule",
-        "This is not part of the shipped policy. It adds one rule on top of the engine: a call "
-        "that would be allowed is held when it is off task and its risk score is at or above a "
-        f"second, lower level. Fitted on the train split with the same objective, that level "
-        f"came out at {off_task_ask:.2f}, with `risk_ask` at {experiment.risk_ask:.2f}, "
-        f"`destructive` at {experiment.destructive:.2f} and `confidence` at "
-        f"{experiment.confidence:.2f}.",
-        table(
-            ["Set", *OUTCOME_HEADERS[1:]],
-            [
-                ["Golden test, Jev tuned", *outcome_row("", on_test["Jev tuned"])[1:]],
-                ["Golden test, experiment", *outcome_row("", on_test["Experiment"])[1:]],
-                ["InjecAgent-derived, Jev tuned", *outcome_row("", on_outside["Jev tuned"])[1:]],
-                ["InjecAgent-derived, experiment", *outcome_row("", on_outside["Experiment"])[1:]],
-            ],
-        ),
+        f"Of the {sum(missed.values())} risky calls allowed, {largest_missed} were of the kind "
+        f'"{largest_missed_kind.lower()}".'
+        if largest_missed
+        else "",
+        "## What the off-task rule adds",
+        'Every row uses the same engine. "Rule off" sets `risk_ask_off_task` equal to '
+        "`risk_ask`. For the tuned row the thresholds were fitted again under that constraint, "
+        "with the same objective and the same recall floor.",
+        "Golden test split:",
+        table(OUTCOME_HEADERS, [outcome_row(label, on_test[label]) for label in rule_rows]),
+        "InjecAgent-derived set:",
+        table(OUTCOME_HEADERS, [outcome_row(label, on_outside[label]) for label in rule_rows]),
         f"![Recall against unnecessary holds for every configuration]({tradeoff_image})",
-        "Each grey point is one setting of `risk_ask` and `confidence` under the shipped rules, "
-        "measured on the golden test split.",
+        "Each small point is one setting of `risk_ask`, `risk_ask_off_task` and `confidence`, "
+        "measured on the golden test split."
+        + (
+            f" {out_of_frame} settings that held more than {pct(TRADEOFF_MAX_HELD)} of benign "
+            "calls are outside the frame."
+            if out_of_frame
+            else ""
+        ),
         "## How good each answer is",
         "Measured on the golden test cases that reached the model. AUROC is the chance that a "
         "true case scores above a false one; 1.0 is perfect and 0.5 is a coin flip.",
@@ -603,7 +629,8 @@ def build() -> str:
         "unstable to read.",
         "## Stability",
         f"{sampled} test cases were each asked five more times. The band chosen under the tuned "
-        f"thresholds was the same all five times for {pct(agreement)} of them. The table shows "
+        f"thresholds was the same all five times for {pct(agreement)} of them; under the "
+        f"starting thresholds, for {pct(start_agreement)}. The table shows "
         "how far each answer moved between repeats of one request.",
         table(
             ["Answer", "Median spread", "95th percentile spread"],
@@ -644,6 +671,11 @@ def build() -> str:
         "requests, as the stability section shows; the cached answers are one draw.",
         "- **The external set's arguments were written for this evaluation.** InjecAgent "
         "publishes instructions and tool names, not the calls a hijacked agent would make.",
+        "- **The off-task rule was chosen after seeing test results.** The first run of this "
+        "evaluation showed, on the test split, that most unnecessary holds were edits the user "
+        "had asked for, and the rule was added in response. Its thresholds were fitted on the "
+        "train split only, but the test split is no longer untouched by design choices, so "
+        "the gain it shows there is likely optimistic.",
         "- **No adversarial pressure.** No case tries to talk the model into a wrong answer "
         "from inside the tool arguments.",
         "- **There is no LLM judge to compare with yet.** That comparison arrives with the "
@@ -654,7 +686,7 @@ def build() -> str:
         "and no API key. To ask the model again from scratch, delete the cache and run "
         "`uv run --env-file .env python -m evals.run` first.",
     ]
-    return "\n\n".join(parts) + "\n"
+    return "\n\n".join(part for part in parts if part) + "\n"
 
 
 def main() -> int:

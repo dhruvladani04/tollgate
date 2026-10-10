@@ -6,9 +6,10 @@ from tollgate.decide.base import NoulAnswer, ScoreAnswer
 from tollgate.policy.engine import Band, confidence, decide_band
 from tollgate.policy.schema import Thresholds
 
-# The spec's starting values.
+# The example policy's starting values.
 T = Thresholds(
     risk_ask=1.0,
+    risk_ask_off_task=0.5,
     risk_block=2.2,
     destructive=0.5,
     exfiltration=0.5,
@@ -108,9 +109,45 @@ def test_exfiltration_or_a_high_risk_off_task_call_is_blocked(given):
     assert band(given) is Band.BLOCK
 
 
-def test_a_low_risk_off_task_call_is_still_allowed():
-    """The spec uses `on_task` only to block high-risk calls."""
+def test_an_off_task_call_below_the_lower_ask_level_is_still_allowed():
+    """Reading something the user did not mention is not held."""
     assert band(answers(risk=0.0, on_task=0.03)) is Band.ALLOW
+    assert band(answers(risk=0.49, on_task=0.03)) is Band.ALLOW
+    assert band(without_context(risk=0.49)) is Band.ALLOW
+
+
+@pytest.mark.parametrize(
+    "given",
+    [answers(risk=0.5, on_task=0.03), answers(risk=0.99, on_task=0.03)],
+    ids=["at-the-lower-level", "just-under-risk-ask"],
+)
+def test_an_off_task_call_between_the_two_ask_levels_is_held(given):
+    """A change nobody asked for is held at a lower risk than one the user asked for."""
+    verdict = decide_band(given, T)
+
+    assert verdict.band is Band.ASK
+    assert any("off task" in reason for reason in verdict.reasons)
+
+
+def test_an_on_task_call_between_the_two_ask_levels_is_allowed():
+    assert band(answers(risk=0.7, on_task=0.97)) is Band.ALLOW
+
+
+def test_without_a_user_request_the_lower_ask_level_applies():
+    """Nothing shows the call serves the user, so it is treated like an off-task one."""
+    verdict = decide_band(without_context(risk=0.7), T)
+
+    assert verdict.band is Band.ASK
+    assert any("request is unknown" in reason for reason in verdict.reasons)
+
+
+def test_the_off_task_rule_is_off_when_the_two_ask_levels_are_equal():
+    switched_off = T.model_copy(update={"risk_ask_off_task": T.risk_ask})
+
+    assert band(answers(risk=0.7, on_task=0.03), switched_off) is Band.ALLOW
+    assert band(without_context(risk=0.7), switched_off) is Band.ALLOW
+    assert band(answers(risk=0.7, on_task=0.6), switched_off) is Band.ALLOW
+    assert band(answers(risk=1.0, on_task=0.97), switched_off) is Band.ASK
 
 
 @pytest.mark.parametrize(
@@ -119,19 +156,30 @@ def test_a_low_risk_off_task_call_is_still_allowed():
         answers(destructive=0.47),
         answers(risk=0.4, risk_confidence=0.3),
         answers(risk=2.6, on_task=0.6),
+        answers(risk=0.7, on_task=0.6),
         answers(exfiltration=0.4),
         answers(exfiltration=0.6, on_task=0.05),
         without_context(destructive=0.7),
     ],
-    ids=["destructive", "risk-spread", "on-task", "exfil-below", "exfil-above", "no-ctx"],
+    ids=[
+        "destructive",
+        "risk-spread",
+        "on-task-high-risk",
+        "on-task-between-ask-levels",
+        "exfil-below",
+        "exfil-above",
+        "no-ctx",
+    ],
 )
 def test_an_uncertain_answer_escalates_whatever_side_of_its_threshold_it_is_on(given):
     assert band(given) is Band.ESCALATE
 
 
 def test_uncertainty_about_the_task_is_ignored_when_it_cannot_change_the_band():
-    """`on_task` only decides anything for a high-risk call."""
+    """`on_task` decides nothing below the lower ask level, or from there up to `risk_block`
+    once `risk_ask` is reached."""
     assert band(answers(risk=0.0, on_task=0.6)) is Band.ALLOW
+    assert band(answers(risk=0.49, on_task=0.6)) is Band.ALLOW
     assert band(answers(risk=1.5, on_task=0.5)) is Band.ASK
 
 
@@ -159,12 +207,14 @@ def test_missing_core_answers_are_held_not_allowed():
 
 
 def test_thresholds_come_from_the_policy_not_from_the_engine():
-    cautious = T.model_copy(update={"destructive": 0.1, "risk_ask": 0.5})
+    cautious = T.model_copy(update={"destructive": 0.1, "risk_ask": 0.5, "risk_ask_off_task": 0.2})
 
     assert band(answers(destructive=0.2)) is Band.ALLOW
     assert band(answers(destructive=0.2), cautious) is Band.ASK
     assert band(answers(risk=0.7)) is Band.ALLOW
     assert band(answers(risk=0.7), cautious) is Band.ASK
+    assert band(answers(risk=0.3, on_task=0.03)) is Band.ALLOW
+    assert band(answers(risk=0.3, on_task=0.03), cautious) is Band.ASK
 
 
 def test_reasons_name_the_signal_that_decided_the_band():
