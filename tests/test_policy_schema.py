@@ -14,12 +14,12 @@ def document() -> dict:
     return copy.deepcopy(yaml.safe_load(EXAMPLE.read_text(encoding="utf-8")))
 
 
-def test_the_example_policy_holds_the_starting_values_from_the_spec():
+def test_the_example_policy_holds_the_fitted_ask_levels_and_the_spec_values_for_the_rest():
     policy = load_policy(EXAMPLE)
 
     assert policy.decision.timeout_ms == 800
-    assert policy.thresholds.risk_ask == 1.0
-    assert policy.thresholds.risk_ask_off_task == 0.5
+    assert policy.thresholds.risk_ask == 1.4
+    assert policy.thresholds.risk_ask_off_task == 0.2
     assert policy.thresholds.risk_block == 2.2
     assert policy.thresholds.confidence == 0.5
     assert {
@@ -103,16 +103,19 @@ def test_a_secret_pattern_that_is_not_a_regular_expression_is_rejected(document)
 def test_a_tool_override_changes_only_the_thresholds_it_names(document):
     document["tools"] = {
         "write_file": {"thresholds": {"destructive": 0.3}},
-        "send_email": {"thresholds": {"risk_ask_off_task": 0.2}},
+        "send_email": {"thresholds": {"risk_ask_off_task": 0.1}},
     }
 
     policy = parse_policy(document)
+    shared = policy.thresholds
 
-    assert policy.thresholds_for("send_email").risk_ask_off_task == 0.2
-    assert policy.thresholds_for("write_file").risk_ask_off_task == 0.5
+    assert policy.thresholds_for("send_email").risk_ask_off_task == 0.1
+    assert policy.thresholds_for("write_file").risk_ask_off_task == shared.risk_ask_off_task
     assert policy.thresholds_for("write_file").destructive == 0.3
-    assert policy.thresholds_for("write_file").risk_ask == 1.0
-    assert policy.thresholds_for("read_text_file") == policy.thresholds
+    assert policy.thresholds_for("write_file").risk_ask == shared.risk_ask
+    assert shared.destructive != 0.3
+    assert shared.risk_ask_off_task != 0.1
+    assert policy.thresholds_for("read_text_file") == shared
 
 
 def test_a_tool_override_that_breaks_the_thresholds_is_rejected(document):
@@ -121,7 +124,7 @@ def test_a_tool_override_that_breaks_the_thresholds_is_rejected(document):
     with pytest.raises(PolicyError, match="risk_ask must not be above risk_block"):
         parse_policy(document)
 
-    document["tools"] = {"write_file": {"thresholds": {"risk_ask": 0.2}}}
+    document["tools"] = {"write_file": {"thresholds": {"risk_ask": 0.1}}}
 
     with pytest.raises(PolicyError, match="risk_ask_off_task must not be above risk_ask"):
         parse_policy(document)

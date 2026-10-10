@@ -18,6 +18,7 @@ from sklearn.metrics import roc_auc_score  # noqa: E402
 
 from evals.data import (  # noqa: E402
     CACHE,
+    EXAMPLE_POLICY,
     GOLDEN_CALLS,
     INJECAGENT_CALLS,
     META,
@@ -51,7 +52,7 @@ from tollgate.decide.base import Decision  # noqa: E402
 from tollgate.decide.cache import DecisionCache  # noqa: E402
 from tollgate.policy.engine import confidence as answer_confidence  # noqa: E402
 from tollgate.policy.engine import decide_band  # noqa: E402
-from tollgate.policy.schema import Thresholds  # noqa: E402
+from tollgate.policy.schema import Thresholds, load_policy  # noqa: E402
 
 RESULTS = REPO / "docs" / "results.md"
 IMAGES = REPO / "docs" / "img"
@@ -64,7 +65,11 @@ ECE_BINS = 15
 COVERAGE_FLOOR = 0.1
 NOULS = ("destructive", "exfiltration", "on_task")
 # Where each label sits beside its point in the trade-off figure, in points.
-TRADEOFF_LABEL_OFFSETS = {"Jev tuned": (-12, 10), "Jev at 0.5": (10, -5)}
+TRADEOFF_LABEL_OFFSETS = {
+    "Jev tuned": (-12, -18),
+    "Jev, ask levels tuned": (-2, 10),
+    "Jev at 0.5": (10, -5),
+}
 # The trade-off figure stops here; settings that hold more benign calls are not drawn.
 TRADEOFF_MAX_HELD = 0.6
 
@@ -310,6 +315,28 @@ def build() -> str:
         update={"risk_ask_off_task": start.thresholds.risk_ask}
     )
     tuned_rule_off = tune(train, start.thresholds, off_task_rule=False)
+    # Only the two ask levels fitted; every threshold behind a block keeps its start value.
+    ask_tuned = tune(train, start.thresholds, ask_levels_only=True)
+    # Which of the measured configurations the example policy holds, if any.
+    shipped_thresholds = load_policy(EXAMPLE_POLICY).thresholds
+    shipped = next(
+        (
+            label
+            for label, thresholds in (
+                ("Jev at 0.5", start.thresholds),
+                ("Jev, ask levels tuned", ask_tuned),
+                ("Jev tuned", tuned),
+            )
+            if thresholds == shipped_thresholds
+        ),
+        None,
+    )
+    shipped_sentence = (
+        f"`policy.example.yaml`, the policy Tollgate ships as its example, holds the "
+        f'thresholds of "{shipped}".'
+        if shipped
+        else "`policy.example.yaml` holds thresholds that match none of these configurations."
+    )
 
     def results(samples: list[Sample], bare: list[Sample]) -> dict[str, GateOutcome]:
         return {
@@ -320,12 +347,18 @@ def build() -> str:
             "Jev tuned, off-task rule off": outcome(samples, bands(samples, tuned_rule_off)),
             "Jev at 0.5, no user request": outcome(bare, bands(bare, start.thresholds)),
             "Jev tuned, no user request": outcome(bare, bands(bare, tuned)),
+            "Jev, ask levels tuned": outcome(samples, bands(samples, ask_tuned)),
+            "Jev, ask levels tuned, no user request": outcome(bare, bands(bare, ask_tuned)),
         }
 
     on_test = results(test, test_bare)
     on_outside = results(outside, outside_bare)
-    main_rows = ("Rules only", "Jev at 0.5", "Jev tuned")
-    bare_rows = ("Jev at 0.5, no user request", "Jev tuned, no user request")
+    main_rows = ("Rules only", "Jev at 0.5", "Jev, ask levels tuned", "Jev tuned")
+    bare_rows = (
+        "Jev at 0.5, no user request",
+        "Jev, ask levels tuned, no user request",
+        "Jev tuned, no user request",
+    )
     rule_rows = (
         "Jev at 0.5, off-task rule off",
         "Jev at 0.5",
@@ -417,6 +450,7 @@ def build() -> str:
     # --- operations and stability -----------------------------------------------------
     sampled, agreement, spreads, timings = stability(tuned)
     _, start_agreement, _, _ = stability(start.thresholds)
+    _, ask_tuned_agreement, _, _ = stability(ask_tuned)
     largest_missed_kind, largest_missed = missed.most_common(1)[0]
     tokens = [
         decision.input_tokens
@@ -438,10 +472,12 @@ def build() -> str:
     jev, fitted = on_test["Jev at 0.5"], on_test["Jev tuned"]
     no_rule = on_test["Jev tuned, off-task rule off"]
     no_request = on_test["Jev tuned, no user request"]
+    ask_only = on_test["Jev, ask levels tuned"]
     threshold_rows = [
         [
             f"`{name}`",
             f"{getattr(start.thresholds, name):.2f}",
+            f"{getattr(ask_tuned, name):.2f}",
             f"{getattr(tuned, name):.2f}",
             f"{getattr(tuned_rule_off, name):.2f}",
         ]
@@ -456,12 +492,16 @@ def build() -> str:
         f"{meta.get('asked_on', 'an unrecorded date')}.",
         "## The short version",
         "The table shows each configuration on the golden test split, which was not used "
-        "for tuning.",
+        f"for tuning. {shipped_sentence}",
         table(OUTCOME_HEADERS, [outcome_row(label, on_test[label]) for label in main_rows]),
         f"- **Rules only** caught {pct(on_test['Rules only'].recall_on_risky)} of risky calls.",
         f"- **Jev at the starting thresholds** caught {pct(jev.recall_on_risky)} of risky calls "
         f"and held {pct(jev.false_ask_rate)} of benign ones.",
-        f"- **After tuning**, those figures were {pct(fitted.recall_on_risky)} and "
+        f"- **With only the two ask levels tuned**, those figures were "
+        f"{pct(ask_only.recall_on_risky)} and {pct(ask_only.false_ask_rate)}. No threshold "
+        "that takes part in a block decision was changed, so the gate blocks exactly the "
+        "same calls as at the starting thresholds.",
+        f"- **With every threshold tuned**, they were {pct(fitted.recall_on_risky)} and "
         f"{pct(fitted.false_ask_rate)}. Malicious calls blocked outright, instead of put to a "
         f"person, went from {pct(jev.block_recall)} to {pct(fitted.block_recall)}.",
         f"- **Tuned the same way with the off-task rule switched off**, the gate caught "
@@ -508,7 +548,9 @@ def build() -> str:
         "- **Jev at 0.5.** The starting policy: every yes/no threshold at 0.5, the risk levels "
         "from the build plan, and `risk_ask_off_task` at "
         f"{start.thresholds.risk_ask_off_task:.2f}.",
-        "- **Jev tuned.** The same rules with thresholds fitted on the golden train split.",
+        "- **Jev, ask levels tuned.** The starting policy with only `risk_ask` and "
+        "`risk_ask_off_task` fitted on the golden train split.",
+        "- **Jev tuned.** The same rules with every threshold fitted on the golden train split.",
         "Two more configurations from the build plan, escalation to an LLM judge and an LLM "
         "judge on every call, are not built yet.",
         "### The off-task rule",
@@ -527,8 +569,13 @@ def build() -> str:
         "settings that caught at least as many risky calls as the starting policy, the one "
         "with the fewest benign calls held won. Tuning was therefore not allowed to trade away "
         "detection.",
-        table(["Threshold", "Start", "Tuned", "Tuned, off-task rule off"], threshold_rows),
-        "The tuned values are not in `policy.example.yaml`, which still holds the starting values.",
+        'For "ask levels tuned", only that second step was run, over `risk_ask` and '
+        "`risk_ask_off_task`, with every other threshold left at its starting value.",
+        table(
+            ["Threshold", "Start", "Ask levels tuned", "Tuned", "Tuned, off-task rule off"],
+            threshold_rows,
+        ),
+        shipped_sentence,
         "## Results on the external set",
         table(OUTCOME_HEADERS, [outcome_row(label, on_outside[label]) for label in main_rows]),
         "The thresholds were fitted on the golden set only, so this table shows how they carry "
@@ -537,7 +584,7 @@ def build() -> str:
         "An MCP tool call does not say what the user asked for. Tollgate knows only when the "
         "client or a hook supplies it. Without the request, only `risk` and `destructive` can "
         "be asked, nothing can be blocked by the model, and the lower ask level applies to "
-        "every call. These are the same two policies as above, on the same cases with the "
+        "every call. These are the same policies as above, on the same cases with the "
         "request left out.",
         "Golden test split:",
         table(OUTCOME_HEADERS, [outcome_row(label, on_test[label]) for label in bare_rows]),
@@ -630,7 +677,8 @@ def build() -> str:
         "## Stability",
         f"{sampled} test cases were each asked five more times. The band chosen under the tuned "
         f"thresholds was the same all five times for {pct(agreement)} of them; under the "
-        f"starting thresholds, for {pct(start_agreement)}. The table shows "
+        f"starting thresholds, for {pct(start_agreement)}; with only the ask levels tuned, "
+        f"for {pct(ask_tuned_agreement)}. The table shows "
         "how far each answer moved between repeats of one request.",
         table(
             ["Answer", "Median spread", "95th percentile spread"],
@@ -676,6 +724,9 @@ def build() -> str:
         "had asked for, and the rule was added in response. Its thresholds were fitted on the "
         "train split only, but the test split is no longer untouched by design choices, so "
         "the gain it shows there is likely optimistic.",
+        "- **The configuration that ships was picked by comparing these results.** Its "
+        "thresholds were fitted on the train split, but the choice between configurations "
+        "was made on the test sets, so its test numbers are likely optimistic.",
         "- **No adversarial pressure.** No case tries to talk the model into a wrong answer "
         "from inside the tool arguments.",
         "- **There is no LLM judge to compare with yet.** That comparison arrives with the "

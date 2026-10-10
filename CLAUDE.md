@@ -139,10 +139,12 @@ stop the user's session to free the file.
 ## The policy and the gate
 
 - **Every number is in the policy file.** `policy/schema.py` gives no section a default,
-  so a policy that leaves out a threshold is rejected. `policy.example.yaml` holds
-  starting values: the spec's, plus `risk_ask_off_task` at 0.5. The values M4 fitted are
-  listed in `docs/results.md`. The user decided not to put them in the example policy
-  yet.
+  so a policy that leaves out a threshold is rejected.
+- **What the example policy ships.** `policy.example.yaml` holds the two ask levels M4
+  fitted (`risk_ask` 1.4, `risk_ask_off_task` 0.2) and the spec's starting value for every
+  other threshold. The report calls this "Jev, ask levels tuned", and a test fails if the
+  file and that configuration differ. The evaluation's baseline thresholds are
+  `START_THRESHOLDS` in `evals/data.py`; they are not read from the example policy.
 - **`Gate` in `proxy/intercept.py` is the whole flow:** pre-filter, then the model within
   the time budget, then the band engine, then the action, then one audit row.
 - **Pre-filter order** (`policy/prefilter.py`): deny list, secret patterns, path sandbox,
@@ -211,6 +213,9 @@ stop the user's session to free the file.
   catch at least as many risky calls as the starting policy are eligible; among them the
   fewest benign holds wins. An earlier F2 objective was dropped because it reached 100%
   recall by holding half the benign calls.
+- **A narrower fit, `tune(..., ask_levels_only=True)`,** fits only `risk_ask` and
+  `risk_ask_off_task` and leaves every other threshold at its starting value, so the gate
+  blocks exactly what it blocked before. The report lists it as "Jev, ask levels tuned".
 - **The test split has informed one design choice.** The off-task rule was added after
   reading where the gate was wrong on the test split, and the report says so. Do not add
   another rule or change the tuning that way without saying so in the report.
@@ -285,9 +290,11 @@ Built in M4 on Claude's judgment, and not explicitly confirmed by the user:
 
 - **Off-task ask rule (decided 10 Oct 2026).** The user chose to add it to the band
   engine after M4's first results.
-- **Tuned thresholds are not the default yet (decided 10 Oct 2026).** The example policy
-  keeps the starting values, because tuned block precision on the external set is too
-  low and a wrong block cannot be approved by a person. Ask before changing this.
+- **The example policy ships only the two tuned ask levels (decided 10 Oct 2026).** The
+  user first chose to ship no tuned threshold, then, after the mix was measured, to ship
+  these two. The thresholds behind a block stay at their starting values, because fully
+  tuned block precision on the external set is too low and a wrong block cannot be
+  approved by a person. Ask before changing them.
 - **`httpx2` is a declared dependency, and the original plan file and
   `jev_in_agent_loop.svg` are gitignored (decided 10 Oct 2026).**
 
@@ -330,6 +337,10 @@ Built with the off-task rule on Claude's judgment, and not explicitly confirmed:
   test split, rules alone caught 11.9% of risky calls; Jev at the starting thresholds
   caught 97.0% and held 28.7% of benign calls; tuned, 93.3% and 7.4%, with malicious
   calls blocked outright rising from 56.9% to 87.9%. Tuned the same way with the rule
-  off, 93.3% and 30.9%. Median decision time 321 ms, p95 416 ms; about $0.022 per 1,000
+  off, 93.3% and 30.9%. With only the two ask levels tuned, which is what the example
+  policy ships, 96.3% and 9.6%, and the same blocks as at the start; on the InjecAgent
+  set that configuration is no better than the start (87.8% and 18.4%, against 89.1% and
+  16.3%), and for a client that sends no user request it doubles benign holds there
+  (8.2% to 16.3%). Median decision time 321 ms, p95 416 ms; about $0.022 per 1,000
   calls. Two of the plan's five configurations need the LLM judge and arrive with M5.
 - M5 and M6: not started.

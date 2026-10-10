@@ -7,9 +7,10 @@ Each call ends one of three ways: allow, ask a human, or block.
 
 **Status: early build.** Tollgate gates tool calls: it allows them, holds them for a person,
 or blocks them. The gate has been measured on labelled calls; see
-[How well it works](#how-well-it-works). The example policy still holds the build plan's
-starting thresholds, not the tuned ones. A second model for uncertain calls and scanning of
-tool results are still to come; see the milestones in [docs/spec.md](docs/spec.md).
+[How well it works](#how-well-it-works). In the example policy, the two risk levels for
+asking are fitted to those calls and every other threshold is the build plan's starting
+value. A second model for uncertain calls and scanning of tool results are still to come;
+see the milestones in [docs/spec.md](docs/spec.md).
 
 Tollgate is not a security guarantee. Jev's vendor says adversarial content can move its
 answers, so Tollgate is one layer of defense, not the only one.
@@ -140,22 +141,28 @@ out of tuning:
 | --- | --- | --- | --- |
 | Exact checks only, no model | 11.9% | 1.1% | 13.8% |
 | Jev at the starting thresholds | 97.0% | 28.7% | 56.9% |
-| Jev at tuned thresholds | 93.3% | 7.4% | 87.9% |
+| Jev with only the two ask levels tuned (the example policy) | 96.3% | 9.6% | 56.9% |
+| Jev with every threshold tuned | 93.3% | 7.4% | 87.9% |
 
-- **Which thresholds ship.** The example policy holds the starting thresholds. The tuned
-  ones are listed in the results and are not the default yet. On a second test set, derived
-  from the InjecAgent benchmark, 62.8% of the calls they blocked were truly malicious,
-  against 100% at the starting thresholds, and a blocked call cannot be approved by a
-  person.
-- **Without the user's request,** the tuned gate caught 95.6% of risky calls and held
+- **Which thresholds ship.** The example policy sets `risk_ask` to 1.4 and
+  `risk_ask_off_task` to 0.2, and leaves every other threshold at its starting value. It
+  blocks exactly the calls the starting thresholds block.
+- **Why not every tuned threshold.** The fully tuned set blocks more. But on a second test
+  set, derived from the InjecAgent benchmark, 62.8% of the calls it blocked were truly
+  malicious, against 100% for the example policy, and a blocked call cannot be approved
+  by a person.
+- **On that second test set the example policy did no better than the starting
+  thresholds:** 87.8% of risky calls caught and 18.4% of benign calls held, against 89.1%
+  and 16.3%.
+- **Without the user's request,** the example policy caught 95.6% of risky calls and held
   30.9% of benign ones. It cannot tell an edit the user asked for from one nobody asked
   for, so it holds both.
 - **Speed and cost.** A decision took a median of 321 ms (416 ms at the 95th percentile)
   and costs about $0.022 per 1,000 calls.
 - **Limits.** The test calls were written for this project and may be easier than real
   traffic. No case tries to talk the model into a wrong answer. The rule that holds
-  unrequested calls sooner was added after seeing test results, so the tuned row is likely
-  optimistic.
+  unrequested calls sooner was added, and the example policy was chosen, after seeing
+  test results, so the two tuned rows are likely optimistic.
 
 [docs/results.md](docs/results.md) has the full tables, a second test set derived from the
 InjecAgent benchmark, calibration, stability and the method. It is generated from Jev's

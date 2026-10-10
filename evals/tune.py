@@ -17,9 +17,13 @@ The fit has two stages.
    one that blocks more of the malicious calls outright.
 
 So tuning is never allowed to buy fewer questions with weaker detection.
+
+A narrower fit runs stage 2 alone, over the two ask levels, and leaves every
+other threshold at its starting value. No threshold that takes part in a block
+decision moves, so the gate blocks exactly what it blocked before.
 """
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 
 from evals.data import (
@@ -146,7 +150,11 @@ def fit_question_thresholds(train: list[Sample], start: Thresholds) -> dict[str,
     return fitted
 
 
-def ask_settings(fitted: dict[str, float], off_task_rule: bool = True) -> Iterator[Thresholds]:
+def ask_settings(
+    fitted: dict[str, float],
+    off_task_rule: bool = True,
+    confidences: Sequence[float] = CONFIDENCES,
+) -> Iterator[Thresholds]:
     """Stage 2's candidates: every combination of the numbers that have no label.
 
     Without `off_task_rule` the two ask levels are kept equal, which switches
@@ -159,7 +167,7 @@ def ask_settings(fitted: dict[str, float], off_task_rule: bool = True) -> Iterat
             [level for level in ASK_LEVELS if level <= risk_ask] if off_task_rule else [risk_ask]
         )
         for off_task in lower_levels:
-            for confidence in CONFIDENCES:
+            for confidence in confidences:
                 yield Thresholds.model_validate(
                     fitted
                     | {
@@ -170,13 +178,25 @@ def ask_settings(fitted: dict[str, float], off_task_rule: bool = True) -> Iterat
                 )
 
 
-def tune(train: list[Sample], start: Thresholds, off_task_rule: bool = True) -> Thresholds:
-    """Fit every threshold on the training samples, starting from `start`."""
-    fitted = fit_question_thresholds(train, start)
+def tune(
+    train: list[Sample],
+    start: Thresholds,
+    off_task_rule: bool = True,
+    ask_levels_only: bool = False,
+) -> Thresholds:
+    """Fit the thresholds on the training samples, starting from `start`.
+
+    With `ask_levels_only`, only `risk_ask` and `risk_ask_off_task` are fitted and
+    every other threshold keeps its starting value.
+    """
+    if ask_levels_only:
+        fitted, confidences = start.model_dump(), [start.confidence]
+    else:
+        fitted, confidences = fit_question_thresholds(train, start), CONFIDENCES
     floor = outcome(train, bands(train, start)).recall_on_risky
 
     best: tuple[tuple[float, ...], Thresholds] | None = None
-    for candidate in ask_settings(fitted, off_task_rule):
+    for candidate in ask_settings(fitted, off_task_rule, confidences):
         result = outcome(train, bands(train, candidate))
         if result.recall_on_risky < floor:
             continue
@@ -194,20 +214,25 @@ def tune(train: list[Sample], start: Thresholds, off_task_rule: bool = True) -> 
     return best[1] if best is not None else Thresholds.model_validate(fitted)
 
 
-def fitted_policies() -> tuple[Policy, Policy]:
-    """The start policy and the policy tuned on the training split."""
+def fitted_policies() -> tuple[Policy, Policy, Policy]:
+    """The start policy, the one with only its ask levels tuned, and the fully tuned one."""
     start = start_policy()
     train = [case for case in load_cases(GOLDEN) if case["split"] == "train"]
     samples = load_samples(train, DecisionCache(CACHE), start, with_user_request=True)
-    return start, with_thresholds(start, tune(samples, start.thresholds))
+    return (
+        start,
+        with_thresholds(start, tune(samples, start.thresholds, ask_levels_only=True)),
+        with_thresholds(start, tune(samples, start.thresholds)),
+    )
 
 
 def main() -> None:
-    start, tuned = fitted_policies()
-    print(f"{'threshold':<20}{'start':>8}{'tuned':>8}")
+    start, ask_tuned, tuned = fitted_policies()
+    print(f"{'threshold':<20}{'start':>8}{'ask levels tuned':>18}{'tuned':>8}")
     for name in Thresholds.model_fields:
         print(
             f"{name:<20}{getattr(start.thresholds, name):>8.2f}"
+            f"{getattr(ask_tuned.thresholds, name):>18.2f}"
             f"{getattr(tuned.thresholds, name):>8.2f}"
         )
 

@@ -3,7 +3,14 @@
 import pytest
 from fakes import decision
 
-from evals.data import key_for, start_policy
+from evals.data import (
+    CACHE,
+    EXAMPLE_POLICY,
+    GOLDEN_CALLS,
+    key_for,
+    load_cases,
+    start_policy,
+)
 from evals.tune import (
     MissingAnswers,
     Sample,
@@ -16,6 +23,7 @@ from evals.tune import (
     tune,
 )
 from tollgate.decide.cache import DecisionCache
+from tollgate.policy.schema import load_policy
 
 START = start_policy().thresholds
 
@@ -176,6 +184,31 @@ def test_with_the_off_task_rule_switched_off_tuning_cannot_tell_those_edits_apar
 
     assert tuned.risk_ask_off_task == tuned.risk_ask
     assert (after.recall_on_risky, after.false_ask_rate) == (1.0, 0.5)
+
+
+def test_tuning_only_the_ask_levels_leaves_every_other_threshold_at_its_start_value():
+    train = edits_asked_for_and_not()
+
+    tuned = tune(train, START, ask_levels_only=True)
+    after = outcome(train, bands(train, tuned))
+
+    changed = {"risk_ask": tuned.risk_ask, "risk_ask_off_task": tuned.risk_ask_off_task}
+    assert tuned.model_dump() == START.model_dump() | changed
+    # The full fit would have moved `risk_block` on these samples.
+    assert tune(train, START).risk_block != START.risk_block
+    assert (after.recall_on_risky, after.false_ask_rate) == (1.0, 0.0)
+    assert tuned.risk_ask_off_task <= 1.2 < tuned.risk_ask
+
+
+def test_the_example_policy_ships_the_ask_levels_fitted_on_the_train_split():
+    """The README and the report say it does; this keeps that true."""
+    start = start_policy()
+    train = [case for case in load_cases(GOLDEN_CALLS) if case["split"] == "train"]
+    samples = load_samples(train, DecisionCache(CACHE), start, with_user_request=True)
+
+    fitted = tune(samples, start.thresholds, ask_levels_only=True)
+
+    assert load_policy(EXAMPLE_POLICY).thresholds == fitted
 
 
 def test_loading_uses_the_pre_filter_first_and_reports_missing_answers(tmp_path):

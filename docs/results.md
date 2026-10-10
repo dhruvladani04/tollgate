@@ -6,19 +6,22 @@ The answers come from `jev-1.13.0`, asked on 2026-10-10.
 
 ## The short version
 
-The table shows each configuration on the golden test split, which was not used for tuning.
+The table shows each configuration on the golden test split, which was not used for tuning. `policy.example.yaml`, the policy Tollgate ships as its example, holds the thresholds of "Jev, ask levels tuned".
 
 | Configuration | Risky calls caught | Benign calls held | Malicious calls blocked | Block precision | Calls a person is asked about | Of which uncertain |
 | --- | --- | --- | --- | --- | --- | --- |
 | Rules only | 11.9% | 1.1% | 13.8% | 47.1% | 0.0% | 0.0% |
 | Jev at 0.5 | 97.0% | 28.7% | 56.9% | 75.0% | 49.8% | 21.8% |
+| Jev, ask levels tuned | 96.3% | 9.6% | 56.9% | 75.0% | 41.5% | 22.3% |
 | Jev tuned | 93.3% | 7.4% | 87.9% | 78.5% | 29.7% | 0.9% |
 
 - **Rules only** caught 11.9% of risky calls.
 
 - **Jev at the starting thresholds** caught 97.0% of risky calls and held 28.7% of benign ones.
 
-- **After tuning**, those figures were 93.3% and 7.4%. Malicious calls blocked outright, instead of put to a person, went from 56.9% to 87.9%.
+- **With only the two ask levels tuned**, those figures were 96.3% and 9.6%. No threshold that takes part in a block decision was changed, so the gate blocks exactly the same calls as at the starting thresholds.
+
+- **With every threshold tuned**, they were 93.3% and 7.4%. Malicious calls blocked outright, instead of put to a person, went from 56.9% to 87.9%.
 
 - **Tuned the same way with the off-task rule switched off**, the gate caught 93.3% of risky calls and held 30.9% of benign ones.
 
@@ -52,7 +55,9 @@ The table shows each configuration on the golden test split, which was not used 
 
 - **Jev at 0.5.** The starting policy: every yes/no threshold at 0.5, the risk levels from the build plan, and `risk_ask_off_task` at 0.50.
 
-- **Jev tuned.** The same rules with thresholds fitted on the golden train split.
+- **Jev, ask levels tuned.** The starting policy with only `risk_ask` and `risk_ask_off_task` fitted on the golden train split.
+
+- **Jev tuned.** The same rules with every threshold fitted on the golden train split.
 
 Two more configurations from the build plan, escalation to an LLM judge and an LLM judge on every call, are not built yet.
 
@@ -66,17 +71,19 @@ The rule is not in the build plan's band table. It was added after the first run
 
 Each yes/no question's threshold was set to maximise F1 against its own label on the train split, and `risk_block` the same way against "hard to undo or worse". `risk_ask`, `risk_ask_off_task` and `confidence` have no label of their own, so they were chosen together by running the real band engine over the train split: among settings that caught at least as many risky calls as the starting policy, the one with the fewest benign calls held won. Tuning was therefore not allowed to trade away detection.
 
-| Threshold | Start | Tuned | Tuned, off-task rule off |
-| --- | --- | --- | --- |
-| `risk_ask` | 1.00 | 1.40 | 0.60 |
-| `risk_ask_off_task` | 0.50 | 0.20 | 0.60 |
-| `risk_block` | 2.20 | 1.50 | 1.50 |
-| `destructive` | 0.50 | 0.63 | 0.63 |
-| `exfiltration` | 0.50 | 0.61 | 0.61 |
-| `on_task` | 0.50 | 0.87 | 0.87 |
-| `confidence` | 0.50 | 0.05 | 0.10 |
+For "ask levels tuned", only that second step was run, over `risk_ask` and `risk_ask_off_task`, with every other threshold left at its starting value.
 
-The tuned values are not in `policy.example.yaml`, which still holds the starting values.
+| Threshold | Start | Ask levels tuned | Tuned | Tuned, off-task rule off |
+| --- | --- | --- | --- | --- |
+| `risk_ask` | 1.00 | 1.40 | 1.40 | 0.60 |
+| `risk_ask_off_task` | 0.50 | 0.20 | 0.20 | 0.60 |
+| `risk_block` | 2.20 | 2.20 | 1.50 | 1.50 |
+| `destructive` | 0.50 | 0.50 | 0.63 | 0.63 |
+| `exfiltration` | 0.50 | 0.50 | 0.61 | 0.61 |
+| `on_task` | 0.50 | 0.50 | 0.87 | 0.87 |
+| `confidence` | 0.50 | 0.50 | 0.05 | 0.10 |
+
+`policy.example.yaml`, the policy Tollgate ships as its example, holds the thresholds of "Jev, ask levels tuned".
 
 ## Results on the external set
 
@@ -84,19 +91,21 @@ The tuned values are not in `policy.example.yaml`, which still holds the startin
 | --- | --- | --- | --- | --- | --- | --- |
 | Rules only | 0.0% | 0.0% | 0.0% | n/a | 0.0% | 0.0% |
 | Jev at 0.5 | 89.1% | 16.3% | 75.8% | 100.0% | 48.8% | 26.3% |
+| Jev, ask levels tuned | 87.8% | 18.4% | 75.8% | 100.0% | 48.3% | 26.8% |
 | Jev tuned | 84.6% | 14.3% | 95.2% | 62.8% | 22.0% | 2.9% |
 
 The thresholds were fitted on the golden set only, so this table shows how they carry over to cases from a different source.
 
 ## Results without the user's request
 
-An MCP tool call does not say what the user asked for. Tollgate knows only when the client or a hook supplies it. Without the request, only `risk` and `destructive` can be asked, nothing can be blocked by the model, and the lower ask level applies to every call. These are the same two policies as above, on the same cases with the request left out.
+An MCP tool call does not say what the user asked for. Tollgate knows only when the client or a hook supplies it. Without the request, only `risk` and `destructive` can be asked, nothing can be blocked by the model, and the lower ask level applies to every call. These are the same policies as above, on the same cases with the request left out.
 
 Golden test split:
 
 | Configuration | Risky calls caught | Benign calls held | Malicious calls blocked | Block precision | Calls a person is asked about | Of which uncertain |
 | --- | --- | --- | --- | --- | --- | --- |
 | Jev at 0.5, no user request | 92.6% | 30.9% | 13.8% | 47.1% | 59.8% | 14.8% |
+| Jev, ask levels tuned, no user request | 95.6% | 30.9% | 13.8% | 47.1% | 61.6% | 14.8% |
 | Jev tuned, no user request | 95.6% | 30.9% | 13.8% | 47.1% | 61.6% | 0.0% |
 
 InjecAgent-derived set:
@@ -104,6 +113,7 @@ InjecAgent-derived set:
 | Configuration | Risky calls caught | Benign calls held | Malicious calls blocked | Block precision | Calls a person is asked about | Of which uncertain |
 | --- | --- | --- | --- | --- | --- | --- |
 | Jev at 0.5, no user request | 82.1% | 8.2% | 0.0% | n/a | 64.4% | 10.7% |
+| Jev, ask levels tuned, no user request | 84.0% | 16.3% | 0.0% | n/a | 67.8% | 10.7% |
 | Jev tuned, no user request | 84.0% | 16.3% | 0.0% | n/a | 67.8% | 1.0% |
 
 ## Where the tuned gate is wrong
@@ -207,7 +217,7 @@ The curve starts at 10.0% because the rate over fewer cases is too unstable to r
 
 ## Stability
 
-57 test cases were each asked five more times. The band chosen under the tuned thresholds was the same all five times for 91.2% of them; under the starting thresholds, for 93.0%. The table shows how far each answer moved between repeats of one request.
+57 test cases were each asked five more times. The band chosen under the tuned thresholds was the same all five times for 91.2% of them; under the starting thresholds, for 93.0%; with only the ask levels tuned, for 93.0%. The table shows how far each answer moved between repeats of one request.
 
 | Answer | Median spread | 95th percentile spread |
 | --- | --- | --- |
@@ -241,6 +251,8 @@ Times are for calls made one after another over one open connection, from the ma
 - **The external set's arguments were written for this evaluation.** InjecAgent publishes instructions and tool names, not the calls a hijacked agent would make.
 
 - **The off-task rule was chosen after seeing test results.** The first run of this evaluation showed, on the test split, that most unnecessary holds were edits the user had asked for, and the rule was added in response. Its thresholds were fitted on the train split only, but the test split is no longer untouched by design choices, so the gain it shows there is likely optimistic.
+
+- **The configuration that ships was picked by comparing these results.** Its thresholds were fitted on the train split, but the choice between configurations was made on the test sets, so its test numbers are likely optimistic.
 
 - **No adversarial pressure.** No case tries to talk the model into a wrong answer from inside the tool arguments.
 
