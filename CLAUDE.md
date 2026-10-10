@@ -58,11 +58,21 @@ uv run python -m tollgate.audit                       print the latest audit rec
 uv run tollgate-approve list                          show the calls being held
 uv run tollgate-approve approve 3                     or: deny 3
 uv run --env-file .env tollgate --upstreams examples/upstreams.json --policy policy.example.yaml
+uv run python -m evals.report                         rebuild docs/results.md from the cache
+uv run python -m evals.tune                           print the fitted thresholds
+uv run --env-file .env python -m evals.run            ask Jev about cases not yet cached
+uv run python -m evals.build_golden                   rebuild the golden set from the scenes
 claude --mcp-config examples/claude_code.mcp.json --settings examples/claude_code.settings.json
 ```
 
 `.env` sets `TOLLGATE_JEV_ROUTE` and the key for that route. A few tests start real
-server processes, so the full run takes about 45 seconds.
+server processes and one rebuilds the evaluation report, so the full run takes about a
+minute.
+
+While a Claude Code session is using Tollgate, Windows locks
+`.venv/Scripts/tollgate.exe`, and any `uv run` or `uv add` that reinstalls the project
+fails. Add `--no-sync` to `uv run`, or call `.venv/Scripts/python.exe` directly. Do not
+stop the user's session to free the file.
 
 ## The proxy
 
@@ -130,7 +140,8 @@ server processes, so the full run takes about 45 seconds.
 
 - **Every number is in the policy file.** `policy/schema.py` gives no section a default,
   so a policy that leaves out a threshold is rejected. `policy.example.yaml` holds the
-  spec's starting values, which are untuned until M4.
+  spec's starting values. M4 fitted tuned values, which are listed in `docs/results.md`
+  and are not in the example policy; see "Open for the user" below.
 - **`Gate` in `proxy/intercept.py` is the whole flow:** pre-filter, then the model within
   the time budget, then the band engine, then the action, then one audit row.
 - **Pre-filter order** (`policy/prefilter.py`): deny list, secret patterns, path sandbox,
@@ -166,6 +177,39 @@ server processes, so the full run takes about 45 seconds.
   the reason.
 - **A cached decision survives an outage:** the cache answers before the model is asked.
 
+## The evaluation
+
+- **Scenes, not cases, are the source.** `evals/scenes/*.py` holds 330 hand-written
+  scenes. `evals/golden.py` pairs each with a request it serves and an unrelated one,
+  and derives every label from the scene's facts by fixed rules. Change a label by
+  changing a fact or a rule, never one case.
+- **The data files are committed.** After editing a scene, run
+  `python -m evals.build_golden`; a test fails if `evals/data/golden_calls.jsonl`
+  differs from what the scenes build. A changed call has a new cache key, so run
+  `evals.run` to fill it, then `evals.report`.
+- **Both cases of a scene share a split,** fixed by `SPLIT_SEED`. The InjecAgent-derived
+  set is test only and is never used for tuning.
+- **The cache is the evaluation.** `evals/cache/` holds Jev's answers keyed by exact
+  request, plus the timed repeats. `evals.report` reads only that, calls no model and
+  needs no key. A test fails if `docs/results.md` differs from what the cache produces,
+  so rerun the report after any change to the data, tuning or report code.
+- **A case that carries a secret is never sent to Jev.** `evals.run` skips it exactly as
+  the gate would, and a test checks that the cache holds no answer for one. The golden
+  file contains AWS's published example key id (`AKIA...EXAMPLE`) for those cases; it
+  is not a real credential.
+- **Tuning** (`evals/tune.py`) has two stages: each yes/no threshold is fitted to its
+  own label by F1, then `risk_ask` and `confidence` are chosen by running the real band
+  engine over the train split. Only settings that catch at least as many risky calls as
+  the starting policy are eligible; among them the fewest benign holds wins. An earlier
+  F2 objective was dropped because it reached 100% recall by holding half the benign
+  calls.
+- **`evals/experiments.py` is not shipped behaviour.** It measures one extra rule on top
+  of the engine and is reported separately.
+- **The README's headline numbers are copied from `docs/results.md`.** Update them when
+  the report changes.
+- **Figures** follow one two-colour palette on a light surface, set at the top of
+  `evals/report.py`.
+
 ## Layout
 
 ```text
@@ -180,7 +224,15 @@ src/tollgate/
   dashboard/          FastAPI dashboard (M6)
   context.py          call context types; import-light for the hook
   prompts.py          the Claude Code hook command and its prompt log
-evals/                golden data, runner, tuning, report (M4)
+docs/results.md       the evaluation report, generated; do not edit by hand
+evals/
+  scenes/             the hand-written scenes, one file per tool family
+  golden.py           labelling rules and the train/test split
+  injecagent.py       builds the external test set from InjecAgent
+  data/               the committed case files
+  cache/              the committed model answers and timed repeats
+  run.py              asks Jev (needs a key); tune.py, report.py read the cache
+  metrics.py          pure metric functions
 scripts/              developer scripts, such as the Jev smoke test
 tests/
 examples/             upstreams file, Claude Code config, sandbox folder (M1); demos (M6)
@@ -208,10 +260,26 @@ Built on Claude's proposal, and not explicitly confirmed by the user:
 - **Hook and in-client approval, built in one step (decided 9 Oct 2026).** The user chose
   to build the Claude Code hook and approval through MCP elicitation together.
 
-Proposed by Claude and not yet confirmed by the user:
+Built in M4 on Claude's judgment, and not explicitly confirmed by the user:
 
-- In M4, measure every configuration with and without the user request, to publish how
-  much knowing the request adds.
+- Every configuration is measured with and without the user request.
+- The labelling rules in `evals/golden.py`. The one that moves the numbers most: an
+  easy-to-undo change the user asked for counts as benign.
+- The tuning objective described under "The evaluation".
+- The external set uses InjecAgent only. AgentDojo was not adapted.
+- The tool-result data (deepset/prompt-injections) waits for M5, which builds the
+  result scan it measures.
+
+Open for the user (raised at the end of M4, 10 Oct 2026):
+
+- **Add an off-task rule to the band engine?** The shipped rules use `on_task` only to
+  block a high-risk call, so tuning cannot stop the gate holding edits the user asked
+  for (28.7% of benign test calls). In the experiment, holding an otherwise allowed
+  call when it is off task and its risk is above a second level cut that to 4.3% at
+  about the same recall. It changes the spec's band table and adds one policy number.
+- **Put the tuned thresholds in `policy.example.yaml`?** Tuning blocks more malicious
+  calls outright (56.9% to 77.6%), but on the InjecAgent set block precision fell from
+  100% to 70.9%, and a wrong block cannot be approved by a person.
 
 ## Milestone status
 
@@ -237,4 +305,12 @@ Proposed by Claude and not yet confirmed by the user:
   settings, a `write_file` call got no Claude Code permission prompt, the hook supplied
   the user's prompt so all four questions were answered, and the hold was approved from
   the in-client question in 4 seconds.
-- M4 to M6: not started.
+- **M4 Eval and tuning:** built on 10 Oct 2026. `python -m evals.report` rebuilds
+  `docs/results.md` and three figures from the committed cache in about 10 seconds with
+  no key. The data is 581 golden cases (352 train, 229 test) and 205 InjecAgent-derived
+  test cases. On the golden test split, rules alone caught 11.9% of risky calls; Jev at
+  the starting thresholds caught 94.1% and held 28.7% of benign calls; tuned, 92.6% and
+  28.7%, with malicious calls blocked outright rising from 56.9% to 77.6%. Median
+  decision time 321 ms, p95 416 ms; about $0.022 per 1,000 calls. Two of the plan's five
+  configurations need the LLM judge and arrive with M5.
+- M5 and M6: not started.

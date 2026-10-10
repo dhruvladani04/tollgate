@@ -6,9 +6,10 @@ between an MCP client (Claude Code, Cursor, a LangGraph agent) and the upstream 
 Each call ends one of three ways: allow, ask a human, or block.
 
 **Status: early build.** Tollgate gates tool calls: it allows them, holds them for a person,
-or blocks them. Its thresholds are the untuned starting values from the build plan. Tuning
-them on labelled data, measuring the result, and scanning tool results are still to come;
-see the milestones in [docs/spec.md](docs/spec.md).
+or blocks them. The gate has been measured on labelled calls; see
+[How well it works](#how-well-it-works). The example policy still holds the build plan's
+starting thresholds, not the tuned ones. A second model for uncertain calls and scanning of
+tool results are still to come; see the milestones in [docs/spec.md](docs/spec.md).
 
 Tollgate is not a security guarantee. Jev's vendor says adversarial content can move its
 answers, so Tollgate is one layer of defense, not the only one.
@@ -23,7 +24,7 @@ uv run pytest
 ```
 
 The tests need no API key. A few of them start real server processes, so the run takes
-about 45 seconds.
+about a minute.
 
 ## Give Tollgate a Jev key
 
@@ -124,6 +125,33 @@ allowed by default.
 
 Every number lives in the policy file, and a policy that leaves one out is rejected.
 [policy.example.yaml](policy.example.yaml) explains each setting.
+
+## How well it works
+
+Measured on 10 October 2026 with `jev-1.13.0`, on 229 labelled tool calls that were kept
+out of tuning:
+
+| Configuration | Risky calls caught | Benign calls held | Malicious calls blocked |
+| --- | --- | --- | --- |
+| Exact checks only, no model | 11.9% | 1.1% | 13.8% |
+| Jev at the starting thresholds | 94.1% | 28.7% | 56.9% |
+| Jev at tuned thresholds | 92.6% | 28.7% | 77.6% |
+
+- **Speed and cost.** A decision took a median of 321 ms (416 ms at the 95th percentile)
+  and costs about $0.022 per 1,000 calls.
+- **Where the unnecessary holds come from.** Of the 27 benign calls the tuned gate held,
+  26 were easy-to-undo changes the user had asked for. The current rules treat such a
+  change the same whether or not it was asked for, so tuning thresholds does not fix it.
+- **Limits.** The test calls were written for this project and may be easier than real
+  traffic. No case tries to talk the model into a wrong answer.
+
+[docs/results.md](docs/results.md) has the full tables, a second test set derived from the
+InjecAgent benchmark, calibration, stability and the method. It is generated from Jev's
+answers, which are stored in the repo, so you can rebuild it with no API key:
+
+```text
+uv run python -m evals.report
+```
 
 ## Approve or deny a held call
 
