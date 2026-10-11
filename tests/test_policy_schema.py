@@ -41,6 +41,10 @@ def test_the_example_policy_holds_the_fitted_ask_levels_and_the_spec_values_for_
         ("context", "max_chars"),
         ("prefilter", "max_argument_bytes"),
         ("approval", "timeout_seconds"),
+        ("escalation", "enabled"),
+        ("escalation", "timeout_ms"),
+        ("result_scan", "injected"),
+        ("result_scan", "max_chars"),
     ],
 )
 def test_a_policy_that_leaves_out_a_number_is_rejected(document, missing):
@@ -52,7 +56,10 @@ def test_a_policy_that_leaves_out_a_number_is_rejected(document, missing):
         parse_policy(document)
 
 
-@pytest.mark.parametrize("section", ["decision", "context", "thresholds", "prefilter", "approval"])
+@pytest.mark.parametrize(
+    "section",
+    ["decision", "context", "thresholds", "prefilter", "approval", "escalation", "result_scan"],
+)
 def test_a_policy_that_leaves_out_a_section_is_rejected(document, section):
     del document[section]
 
@@ -90,6 +97,34 @@ def test_out_of_range_and_unknown_values_are_rejected(document, section, field, 
     document[section][field] = value
 
     with pytest.raises(PolicyError, match=message):
+        parse_policy(document)
+
+
+def test_the_example_policy_scans_results_and_leaves_the_second_model_off():
+    policy = load_policy(EXAMPLE)
+
+    assert policy.escalation.enabled is False
+    assert (policy.escalation.provider, policy.escalation.model) == ("gemini", "gemini-3.8-flash")
+    assert policy.escalation.thinking == "low"
+    assert policy.result_scan.enabled is True
+    assert policy.result_scan.injected == 0.5
+
+
+def test_the_second_model_can_be_another_provider_but_thinking_is_for_gemini(document):
+    document["escalation"] |= {
+        "provider": "anthropic",
+        "model": "claude-opus-5-5",
+        "thinking": None,
+    }
+
+    assert parse_policy(document).escalation.provider == "anthropic"
+
+    document["escalation"]["thinking"] = "low"
+    with pytest.raises(PolicyError, match="thinking can only be set when the provider is gemini"):
+        parse_policy(document)
+
+    document["escalation"] |= {"provider": "mistral", "thinking": None}
+    with pytest.raises(PolicyError, match="escalation.provider"):
         parse_policy(document)
 
 

@@ -72,7 +72,7 @@ EXAMPLE_POLICY = Path(__file__).resolve().parents[1] / "policy.example.yaml"
 
 
 def policy(**sections: dict) -> Policy:
-    """The example policy with its exact checks switched off, then any changes applied.
+    """The example policy with its exact checks and result scan off, then any changes applied.
 
     Each keyword names a section and gives the fields to change in it, for example
     `policy(approval={"timeout_seconds": 1})`.
@@ -80,6 +80,7 @@ def policy(**sections: dict) -> Policy:
     document = yaml.safe_load(EXAMPLE_POLICY.read_text(encoding="utf-8"))
     document["prefilter"]["allow_tools"] = []
     document["prefilter"]["path_sandbox"]["roots"] = []
+    document["result_scan"]["enabled"] = False
     for section, changes in sections.items():
         if section == "tools":
             document["tools"] = changes

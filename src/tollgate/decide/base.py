@@ -71,6 +71,10 @@ class DecisionModel(Protocol):
     async def decide(self, request: DecisionRequest) -> Decision: ...
 
 
-# The environment variable that holds the LLM judge's API key. It is named here,
-# apart from the judge itself, so that code which only needs the name stays light.
-LLM_API_KEY_ENV = "GEMINI_API_KEY"
+# The environment variable that holds each LLM provider's API key. They are named
+# here, apart from the judge itself, so that code which only needs the names stays light.
+LLM_API_KEY_ENVS = {
+    "gemini": "GEMINI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+}

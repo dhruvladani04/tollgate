@@ -203,6 +203,8 @@ def test_enforce_mode_holds_a_call_it_cannot_judge_until_the_approval_command_ap
     """
     rules = yaml.safe_load(EXAMPLE_POLICY.read_text(encoding="utf-8"))
     rules["decision"]["timeout_ms"] = 1
+    # These tests are about holding a call; with Jev out of reach a scan would only add a warning.
+    rules["result_scan"]["enabled"] = False
     rules["prefilter"] |= {"allow_tools": [], "deny_tools": ["fail"]}
     rules["prefilter"]["path_sandbox"]["roots"] = []
     policy_file = tmp_path / "policy.yaml"
@@ -275,6 +277,8 @@ def outage_policy(directory: Path) -> Path:
     """The example policy with one millisecond for the model, so every call is held."""
     rules = yaml.safe_load(EXAMPLE_POLICY.read_text(encoding="utf-8"))
     rules["decision"]["timeout_ms"] = 1
+    # These tests are about holding a call; with Jev out of reach a scan would only add a warning.
+    rules["result_scan"]["enabled"] = False
     rules["prefilter"]["allow_tools"] = []
     rules["prefilter"]["path_sandbox"]["roots"] = []
     policy_file = directory / "policy.yaml"

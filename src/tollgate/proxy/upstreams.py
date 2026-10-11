@@ -18,7 +18,7 @@ from mcp import Client, StdioServerParameters, types
 from mcp.client.streamable_http import streamable_http_client
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from tollgate.decide.base import LLM_API_KEY_ENV
+from tollgate.decide.base import LLM_API_KEY_ENVS
 from tollgate.decide.jev import ROUTES
 
 _VARIABLE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
@@ -27,7 +27,9 @@ _VARIABLE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 _HTTP_TIMEOUT = httpx2.Timeout(30.0, read=300.0)
 # Tollgate's own credentials. A stdio upstream never receives these unless the
 # upstreams file passes one on by name.
-_WITHHELD = frozenset(route.api_key_env for route in ROUTES.values()) | {LLM_API_KEY_ENV}
+_WITHHELD = frozenset(route.api_key_env for route in ROUTES.values()) | set(
+    LLM_API_KEY_ENVS.values()
+)
 
 
 class UpstreamConfigError(Exception):

@@ -13,6 +13,7 @@ from tollgate.decide.llm import (
     Judge,
     LlmConfigError,
     LlmDecisionModel,
+    make_provider,
     read_api_key,
     resolve_judge,
 )
@@ -25,7 +26,7 @@ REQUEST = DecisionRequest(
     },
 )
 GOOD = json.dumps({"answers": {"risk": {"0": 0.25, "1": 0.75}, "destructive": 0.9}})
-JUDGE = Judge("test-judge/thinking-low", "test-model", "low", corrective_retries=1)
+JUDGE = Judge("test-model", "low", corrective_retries=1)
 
 
 class FakeProvider:
@@ -71,7 +72,7 @@ def test_the_judge_answers_in_the_same_shape_as_jev():
     assert isinstance(risk, ScoreAnswer)
     assert risk.score == pytest.approx(0.75)
     assert risk.probabilities == pytest.approx((0.25, 0.75))
-    assert decision.model == "test-judge/thinking-low"
+    assert decision.model == "test-model/thinking-low"
     assert (decision.input_tokens, decision.output_tokens) == (200, 90)
 
 
@@ -132,7 +133,34 @@ def test_each_judge_is_pinned_to_one_model_and_thinking_level():
         resolve_judge("gpt-something")
 
 
-def test_the_judge_key_comes_from_the_environment_only():
-    assert read_api_key({"GEMINI_API_KEY": " abc "}) == "abc"
-    with pytest.raises(LlmConfigError, match="GEMINI_API_KEY is not set"):
-        read_api_key({})
+def test_a_judge_with_no_thinking_level_is_named_by_its_model_alone():
+    assert Judge("claude-opus-5-5", None, 1, provider="anthropic").name == "claude-opus-5-5"
+
+
+def test_each_provider_reads_its_own_key_from_the_environment_only():
+    gemini = Judge("gemini-3.8-flash", "low", 1)
+    anthropic = Judge("claude-opus-5-5", None, 1, provider="anthropic")
+    openai = Judge("gpt-x", None, 1, provider="openai")
+
+    assert read_api_key(gemini, {"GEMINI_API_KEY": " abc "}) == "abc"
+    assert read_api_key(anthropic, {"ANTHROPIC_API_KEY": "def"}) == "def"
+    assert read_api_key(openai, {"OPENAI_API_KEY": "ghi"}) == "ghi"
+    with pytest.raises(LlmConfigError, match="ANTHROPIC_API_KEY is not set"):
+        read_api_key(anthropic, {"GEMINI_API_KEY": "abc"})
+
+
+def test_a_provider_whose_sdk_is_not_installed_says_how_to_install_it(monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def without_anthropic(name, *args, **kwargs):
+        if name.startswith("system_one_adapter.providers.anthropic"):
+            raise ImportError(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_anthropic)
+    judge = Judge("claude-opus-5-5", None, 1, provider="anthropic")
+
+    with pytest.raises(LlmConfigError, match=r"uv add 'system-one-adapter\[anthropic\]'"):
+        make_provider(judge, {"ANTHROPIC_API_KEY": "abc"})

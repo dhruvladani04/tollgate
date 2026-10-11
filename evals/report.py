@@ -28,6 +28,9 @@ from evals.data import (  # noqa: E402
     load_cases,
     start_policy,
 )
+from evals.injections import jev_key, load_texts  # noqa: E402
+from evals.injections import judge_key as injection_judge_key  # noqa: E402
+from evals.judge import cache_path  # noqa: E402
 from evals.judges import (  # noqa: E402
     escalated_bands,
     judge_usage,
@@ -36,6 +39,7 @@ from evals.judges import (  # noqa: E402
 from evals.metrics import (  # noqa: E402
     FLAGGED,
     GateOutcome,
+    best_threshold,
     classify,
     expected_calibration_error,
     percentile,
@@ -55,6 +59,7 @@ from evals.tune import (  # noqa: E402
 )
 from tollgate.decide.base import Decision  # noqa: E402
 from tollgate.decide.cache import DecisionCache  # noqa: E402
+from tollgate.decide.llm import resolve_judge  # noqa: E402
 from tollgate.policy.engine import confidence as answer_confidence  # noqa: E402
 from tollgate.policy.engine import decide_band  # noqa: E402
 from tollgate.policy.schema import Thresholds, load_policy  # noqa: E402
@@ -384,6 +389,91 @@ def judge_section(
     return parts, headline, auroc
 
 
+def result_scan_section(cache: DecisionCache, shipped_threshold: float) -> list[str]:
+    """The report section on scanning tool results for injected instructions."""
+    texts = load_texts()
+    train = [entry for entry in texts if entry["split"] == "train"]
+    test = [entry for entry in texts if entry["split"] == "test"]
+
+    def jev_scores(entries: list[dict]) -> list[float]:
+        scores = []
+        for entry in entries:
+            decision = cache.get(jev_key(entry))
+            if decision is None:
+                raise MissingAnswers(
+                    "the injection texts have no cached answer; run "
+                    "`python -m evals.injections jev` with an API key"
+                )
+            scores.append(decision.answers["injected"].probability)
+        return scores
+
+    labels = [entry["injected"] for entry in test]
+    fitted = best_threshold(
+        jev_scores(train),
+        [entry["injected"] for entry in train],
+        candidates=[step / 100 for step in range(1, 100)],
+    )
+
+    def row(name: str, scores: list[float], actual: list[bool], threshold: float) -> list[str]:
+        quality = classify([score > threshold for score in scores], actual)
+        return [
+            name,
+            f"{roc_auc_score(actual, scores):.3f}",
+            f"{threshold:.2f}",
+            pct(quality.precision),
+            pct(quality.recall),
+            f"{quality.f1:.2f}",
+        ]
+
+    test_scores = jev_scores(test)
+    rows = [
+        row("Jev, shipped threshold", test_scores, labels, shipped_threshold),
+        row("Jev, threshold fitted on the train split", test_scores, labels, fitted),
+    ]
+    notes = []
+    for judge_name, (display, _, _) in JUDGES_REPORTED.items():
+        judge = resolve_judge(judge_name)
+        judge_cache = DecisionCache(cache_path(judge_name))
+        answered = [
+            (decision.answers["injected"].probability, entry["injected"])
+            for entry in test
+            if (decision := judge_cache.get(injection_judge_key(judge.name, entry))) is not None
+        ]
+        if not answered:
+            continue
+        rows.append(
+            row(display, [s for s, _ in answered], [a for _, a in answered], shipped_threshold)
+        )
+        if len(answered) < len(test):
+            notes.append(
+                f"{display} answered {len(answered)} of the {len(test)} test texts; its row "
+                "covers those."
+            )
+    injections = sum(labels)
+    return [
+        "## Scanning tool results",
+        "The gate asks one question about the text a tool returns: does it contain instructions "
+        "addressed to an AI assistant? A result over the threshold is withheld from the agent.",
+        f"The measurement uses deepset's [prompt-injections]"
+        f"(https://huggingface.co/datasets/deepset/prompt-injections) set (Apache 2.0), with its "
+        f"own split: {len(train)} train texts and {len(test)} test texts, of which {injections} "
+        "are labelled as injections. Each text was put to the model as a tool result.",
+        table(
+            ["Model", "AUROC", "Threshold", "Precision", "Recall", "F1"],
+            rows,
+        ),
+        *notes,
+        "- **Precision** is the share of withheld results that were truly injections. "
+        "**Recall** is the share of injections that were withheld.",
+        "- **The texts are prompts typed to a chatbot, not text returned by tools.** A benign "
+        "text here is an ordinary question, and an injection is often a role-play request. A "
+        "web page or a file is a different kind of text, so these numbers describe the question "
+        "on a neighbouring task, not the gate on real tool results.",
+        "- **The lower threshold is not shipped.** It was fitted on this set, and nothing here "
+        "shows how often it would withhold a legitimate web page or file.",
+    ]
+
+
 def stability(tuned: Thresholds) -> tuple[int, float, dict[str, tuple[float, float]], list[float]]:
     """From the timed repeats: band agreement, spread of each answer, and the call timings."""
     by_case: dict[str, list[Decision]] = defaultdict(list)
@@ -433,7 +523,8 @@ def build() -> str:
     # Only the two ask levels fitted; every threshold behind a block keeps its start value.
     ask_tuned = tune(train, start.thresholds, ask_levels_only=True)
     # Which of the measured configurations the example policy holds, if any.
-    shipped_thresholds = load_policy(EXAMPLE_POLICY).thresholds
+    shipped_policy = load_policy(EXAMPLE_POLICY)
+    shipped_thresholds = shipped_policy.thresholds
     shipped = next(
         (
             label
@@ -764,6 +855,7 @@ def build() -> str:
             else ""
         ),
         *judge_parts,
+        *result_scan_section(cache, shipped_policy.result_scan.injected),
         "## How good each answer is",
         "Measured on the golden test cases that reached the model. AUROC is the chance that a "
         "true case scores above a false one; 1.0 is perfect and 0.5 is a coin flip.",
@@ -871,8 +963,8 @@ def build() -> str:
         "- **Each LLM judge ran once, at one setting.** No repeats were run for the judges, so "
         "their stability is not measured, and a higher thinking level may judge better. The "
         "judges use thresholds that were fitted to Jev's answers, not their own.",
-        "- **Escalation is measured here, not yet built into the gate.** The numbers show "
-        "what the gate would do if an uncertain call were put to the judge.",
+        "- **Escalation is off in the shipped policy.** The escalation rows show what the gate "
+        "does when the policy turns it on.",
         "## Reproduce",
         "```text\nuv run python -m evals.report\n```",
         "This rebuilds the file and its figures from `evals/cache/`, with no network access "

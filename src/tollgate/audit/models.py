@@ -41,3 +41,16 @@ class AuditRecord(BaseModel):
     answers: dict[str, Answer] = Field(default_factory=dict)
     error: str | None = None
     """Why there is no decision, when the model gave none."""
+    escalation_model: str | None = None
+    """The second model, when the first left the call uncertain and it was asked."""
+    escalation_answers: dict[str, Answer] = Field(default_factory=dict)
+    escalation_latency_ms: float | None = None
+    escalation_error: str | None = None
+    """Why the second model gave no answer, when it gave none."""
+    result_action: str | None = None
+    """What happened to the tool's result: passed, withheld or unscanned."""
+    injected: float | None = None
+    """The probability that the result carries instructions aimed at the agent."""
+    scan_latency_ms: float | None = None
+    withheld_result: str | None = None
+    """The text of a result that was withheld from the agent, as it was scanned."""

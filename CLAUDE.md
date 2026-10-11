@@ -64,6 +64,8 @@ uv run --env-file .env python -m evals.run            ask Jev about cases not ye
 uv run python -m evals.build_golden                   rebuild the golden set from the scenes
 uv run --env-file .env python -m evals.judge gemini-3.8-flash   ask an LLM judge (paid)
 uv run --env-file .env python -m evals.judge gemma-4-31b        ask the free judge (slow)
+uv run --env-file .env python -m evals.injections jev           ask Jev about the scan texts
+uv run --env-file .env python scripts/scan_demo.py              M5 demo: result scan, second model
 claude --mcp-config examples/claude_code.mcp.json --settings examples/claude_code.settings.json
 ```
 
@@ -142,12 +144,17 @@ stop the user's session to free the file.
 
 - **Same interface, same questions.** `decide/llm.py` puts a `DecisionRequest` to an LLM
   through TypeSafe's `system-one-adapter`, so the judge has no prompt of its own.
+- **The gate's second model comes from the policy,** not from `JUDGES`: provider
+  (`gemini`, `anthropic` or `openai`), model id and thinking level. The user asked for
+  this so that someone with a budget can use a stronger model. Only the Gemini SDK is
+  installed; the other two are optional extras, and a missing one stops startup with
+  the install command. `JUDGES` holds the two judges the evaluation used.
 - **Each judge is pinned** in `JUDGES`: model id, thinking level and corrective retries.
   The thinking level is part of the judge's name, and so of its cache key. Gemini 3.8
   Flash rejects thinking `minimal`; `low` is the least it accepts.
-- **The key is `GEMINI_API_KEY`,** for both judges, on Google's API directly. Its name
-  lives in `decide/base.py` so `proxy/upstreams.py` can withhold it without importing
-  the Google SDK.
+- **Keys:** `GEMINI_API_KEY`, `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`, by provider. The
+  names live in `decide/base.py`, and `proxy/upstreams.py` withholds all three from
+  upstream servers.
 - **Thinking tokens are billed as output** but reported apart, and the adapter's own
   Gemini provider leaves them out. `_GeminiJudgeProvider` adds them, so recorded output
   tokens match the bill.
@@ -191,7 +198,17 @@ stop the user's session to free the file.
   allowed.
 - **Without a user request** the block rules cannot fire, a high-risk call is held, and
   the lower ask level applies to every call.
-- **Escalate is held like Ask** until M5 adds the LLM judge.
+- **Escalate is held like Ask,** unless the policy's `escalation.enabled` is on. Then
+  the call is first put to the second model the policy names, within
+  `escalation.timeout_ms`, with the same request and the same thresholds. A clear answer
+  from it decides the band. If it is uncertain too, fails or is late, the call stays
+  Escalate and a person is asked. A second model can also block.
+- **The result scan** (`Gate._scan`) runs after a call is forwarded. It asks Jev the
+  `injected` question about the result's text, cut to `result_scan.max_chars`. Over
+  `result_scan.injected` the result is withheld and its text kept in the audit row; a
+  failed or late scan passes the result on behind a warning; observe mode withholds
+  nothing. The audit row is written before the call runs and annotated afterwards.
+  Only text blocks are scanned.
 - **Fail closed.** No decision within `decision.timeout_ms`, or any model error, holds the
   call for a person. An enforcing gate also refuses a call whose audit row it cannot write.
 - **Approval.** A held call always goes into `.tollgate/approvals.sqlite`, where
@@ -371,12 +388,22 @@ Built with the off-task rule on Claude's judgment, and not explicitly confirmed:
   16.3%), and for a client that sends no user request it doubles benign holds there
   (8.2% to 16.3%). Median decision time 321 ms, p95 416 ms; about $0.022 per 1,000
   calls. Two of the plan's five configurations need the LLM judge and arrive with M5.
-- **M5 Escalation and result scan:** first half built on 11 Oct 2026. The LLM judge
-  backend exists and the report covers all five configurations, which is M5's "Done
-  when". On the golden test split with the shipped thresholds: Jev alone caught 96.3%
-  of risky calls and asked a person about 41.5% of calls; Jev with Gemini 3.8 Flash on
-  uncertain calls, 91.1% and 31.0%; Gemini on every call, 91.1% and 31.4% at about 60
-  times the cost and 12 times the time. Gemma 4 31B answered 781 of 782 cases. Not
-  built yet: escalation inside the gate, and the scan of tool results with its data
-  (deepset/prompt-injections).
+- **M5 Escalation and result scan:** built on 11 Oct 2026. The report covers all five
+  configurations. On the golden test split with the shipped thresholds: Jev alone caught
+  96.3% of risky calls and asked a person about 41.5% of calls; Jev with Gemini 3.8 Flash
+  on uncertain calls, 91.1% and 31.0%; Gemini on every call, 91.1% and 31.4% at about 60
+  times the cost and 12 times the time. Because escalation catches fewer risky calls, the
+  user chose to ship it off, with the second model set in the policy. The result scan is
+  on in the example policy: on deepset's 116 test prompts Jev's AUROC is 0.987, and at
+  the shipped 0.5 it withheld 73.3% of injections with no false alarm. The live demo
+  (`scripts/scan_demo.py`) passed a clean page, withheld an injected one at 0.98, and
+  held a call both models were unsure about.
+- **Decided with the user for M5 (11 Oct 2026):** escalation off by default; the second
+  model chosen in the policy; an injected result is withheld, not passed with a warning;
+  an unscannable result is passed with a warning.
+- **The scan threshold stays at 0.5 (decided with the user, 11 Oct 2026).** The value
+  fitted on the train prompts is 0.10 (88.3% recall and 98.1% precision on test, against
+  73.3% and 100% at 0.5), but those are chatbot prompts, and nothing measures how often
+  0.10 would withhold a real page. `docs/decisions/0002-result-scan-threshold.md` has
+  the record. Measuring the scan on real tool output is what would justify a change.
 - M6: not started.

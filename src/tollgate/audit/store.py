@@ -29,11 +29,19 @@ _COLUMN_TYPES = {
     "output_tokens": "INTEGER",
     "answers": "TEXT NOT NULL",
     "error": "TEXT",
+    "escalation_model": "TEXT",
+    "escalation_answers": "TEXT",
+    "escalation_latency_ms": "REAL",
+    "escalation_error": "TEXT",
+    "result_action": "TEXT",
+    "injected": "REAL",
+    "scan_latency_ms": "REAL",
+    "withheld_result": "TEXT",
 }
 _COLUMNS = tuple(AuditRecord.model_fields)
 assert set(_COLUMNS) == set(_COLUMN_TYPES), "every audit field needs a column type"
 # These hold JSON, so SQLite's JSON functions can query them.
-_JSON_COLUMNS = ("arguments", "answers", "reasons")
+_JSON_COLUMNS = ("arguments", "answers", "reasons", "escalation_answers")
 _CREATE = (
     "CREATE TABLE IF NOT EXISTS decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, "
     + ", ".join(f"{name} {_COLUMN_TYPES[name]}" for name in _COLUMNS)
@@ -72,6 +80,17 @@ class AuditStore:
         cursor = self._connection.execute(_INSERT, row)
         self._connection.commit()
         return cursor.lastrowid or 0
+
+    def annotate(self, row_id: int, **fields: object) -> None:
+        """Add what became known after a record was written, such as its result scan."""
+        unknown = set(fields) - set(_COLUMNS)
+        if unknown:
+            raise ValueError(f"not audit fields: {', '.join(sorted(unknown))}")
+        assignments = ", ".join(f"{name} = :{name}" for name in fields)
+        self._connection.execute(
+            f"UPDATE decisions SET {assignments} WHERE id = :row_id", {**fields, "row_id": row_id}
+        )
+        self._connection.commit()
 
     def recent(self, limit: int) -> list[AuditRecord]:
         """The latest records, newest first."""

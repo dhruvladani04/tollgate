@@ -29,6 +29,7 @@ from tollgate.decide.jev import (
     read_api_key,
     resolve_route,
 )
+from tollgate.decide.llm import Judge, LlmConfigError, LlmDecisionModel
 from tollgate.policy.schema import Policy, PolicyError, load_policy
 from tollgate.prompts import PROMPTS_FILE, PromptLog
 from tollgate.proxy.intercept import (
@@ -106,6 +107,16 @@ def build_server(source: ToolSource) -> Server[Any]:
     )
 
 
+def second_model_for(policy: Policy) -> Any:
+    """The second model the policy names, for calls the first leaves uncertain."""
+    settings = policy.escalation
+    budget = settings.timeout_ms / 1000
+    judge = Judge(settings.model, settings.thinking, settings.corrective_retries, settings.provider)
+    return LlmDecisionModel.for_judge(
+        judge, retry=RetryPolicy(max_retries=policy.decision.max_retries, timeout=budget)
+    )
+
+
 async def serve(
     configs: Mapping[str, UpstreamConfig], gating: Gating | None, state_dir: Path
 ) -> None:
@@ -135,10 +146,14 @@ async def serve(
                 if gating.enforce
                 else None
             )
-            model = CachedDecisionModel(
-                JevDecisionModel(client, gating.route.model),
-                DecisionCache(state_dir / CACHE_FILE),
-            )
+            cache = DecisionCache(state_dir / CACHE_FILE)
+            model = CachedDecisionModel(JevDecisionModel(client, gating.route.model), cache)
+            second_model = None
+            if gating.policy.escalation.enabled:
+                judge = second_model_for(gating.policy)
+                stack.push_async_callback(judge.aclose)
+                # Its answers share the cache; the key names the model, so they never mix.
+                second_model = CachedDecisionModel(judge, cache)
             gate_parts = (model, audit, gating.policy, approvals)
 
         upstreams = await stack.enter_async_context(connect_upstreams(configs))
@@ -161,7 +176,13 @@ async def serve(
                 *gate_parts,
                 enforce=gating.enforce,
                 ambient_context=lambda: prompts.context(gating.started),
+                second_model=second_model,
             )
+            if second_model is not None:
+                logger.info(
+                    "calls the first model is unsure about go to %s before a person",
+                    second_model.model,
+                )
             logger.info(
                 "%s mode: asking %s over the %s route, recording to %s. %s",
                 "enforce" if gating.enforce else "observe",
@@ -232,7 +253,7 @@ def main() -> None:
             )
             read_api_key(gating.route)
         asyncio.run(serve(configs, gating, args.state_dir))
-    except (UpstreamConfigError, JevConfigError, PolicyError) as error:
+    except (UpstreamConfigError, JevConfigError, LlmConfigError, PolicyError) as error:
         sys.exit(f"tollgate: {error}")
     except KeyboardInterrupt:
         pass

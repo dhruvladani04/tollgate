@@ -14,6 +14,11 @@ def render(records: list[AuditRecord]) -> str:
         )
         # With no answers, the reason says what decided: an exact check or a failure.
         evidence = answers or "; ".join(record.reasons) or f"no decision ({record.error})"
+        if record.escalation_model:
+            evidence += f"  second model: {record.escalation_model}"
+        if record.result_action:
+            scanned = "" if record.injected is None else f" (injected={record.injected:.2f})"
+            evidence += f"  result {record.result_action}{scanned}"
         latency = "" if record.latency_ms is None else f"{record.latency_ms:.0f}"
         tokens = (
             "" if record.input_tokens is None else f"{record.input_tokens}/{record.output_tokens}"

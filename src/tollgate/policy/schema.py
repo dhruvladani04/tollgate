@@ -6,7 +6,7 @@ number hides in code.
 
 import re
 from pathlib import Path
-from typing import Annotated, Any, Self
+from typing import Annotated, Any, Literal, Self
 
 import yaml
 from pydantic import (
@@ -117,6 +117,38 @@ class ContextSettings(_Section):
     """The user's request and each earlier turn are cut to this length for the model."""
 
 
+class EscalationSettings(_Section):
+    enabled: bool
+    """When on, a call the first model leaves uncertain is put to a second model
+    before a person is asked."""
+    provider: Literal["gemini", "anthropic", "openai"]
+    model: str = Field(min_length=1)
+    """The provider's id for the second model."""
+    thinking: Literal["low", "medium", "high"] | None
+    """The thinking level to ask Gemini for. It must be empty for other providers."""
+    corrective_retries: int = Field(ge=0)
+    """How many times a malformed answer is sent back to be corrected."""
+    timeout_ms: int = Field(gt=0)
+    """Budget for the second model. Past it, the call is held for a person."""
+
+    @model_validator(mode="after")
+    def _thinking_is_for_gemini_only(self) -> Self:
+        if self.thinking is not None and self.provider != "gemini":
+            raise ValueError("thinking can only be set when the provider is gemini")
+        return self
+
+
+class ResultScanSettings(_Section):
+    enabled: bool
+    """When on, the text a tool returns is checked for instructions aimed at the agent."""
+    injected: Probability
+    """A probability above this withholds the result from the agent."""
+    timeout_ms: int = Field(gt=0)
+    """Budget for one scan. Past it, the result is passed on with a warning."""
+    max_chars: int = Field(gt=0)
+    """A longer result is cut to this length for the scan. The start and the end are kept."""
+
+
 class ToolPolicy(_Section):
     thresholds: ThresholdOverrides = ThresholdOverrides()
 
@@ -127,6 +159,8 @@ class Policy(_Section):
     thresholds: Thresholds
     prefilter: Prefilter
     approval: ApprovalSettings
+    escalation: EscalationSettings
+    result_scan: ResultScanSettings
     tools: dict[str, ToolPolicy] = Field(default_factory=dict)
     """Per-tool overrides of the global thresholds."""
 

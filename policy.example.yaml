@@ -57,6 +57,37 @@ approval:
   # A held call that nobody answers is denied after this long.
   timeout_seconds: 300
 
+escalation:
+  # A call the first model is unsure about normally goes to a person. With this on,
+  # it is first put to a second, slower model, and a person is asked only if that
+  # model is unsure too. In the evaluation this meant fewer questions for a person,
+  # and also fewer risky calls caught, so it is off unless you turn it on.
+  enabled: false
+  # The second model. provider is gemini, anthropic or openai, and its key is read
+  # from GEMINI_API_KEY, ANTHROPIC_API_KEY or OPENAI_API_KEY.
+  provider: gemini
+  model: gemini-3.8-flash
+  # Gemini only: low, medium or high. Leave empty for the other providers.
+  thinking: low
+  # A malformed answer is sent back to be corrected this many times.
+  corrective_retries: 1
+  # If the second model has not answered by then, a person is asked.
+  timeout_ms: 10000
+
+result_scan:
+  # Check the text each tool returns for instructions aimed at the agent, such as
+  # "ignore your earlier instructions". A result over the threshold is withheld from
+  # the agent and kept in the audit log.
+  enabled: true
+  # At 0.5, Jev withheld 73.3% of the injections in a public test set and no benign
+  # text. At 0.10 it withheld 88.3%, with one false alarm. 0.5 is kept because that
+  # set cannot show how often a lower value would withhold a legitimate page.
+  injected: 0.5
+  # If the scan has not finished by then, the result is passed on with a warning.
+  timeout_ms: 800
+  # A longer result is cut to this many characters for the scan.
+  max_chars: 20000
+
 # Per-tool overrides of the thresholds above, for example:
 #
 #   tools:

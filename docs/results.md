@@ -225,6 +225,25 @@ How well each model separates true cases from false ones on the golden test spli
 | `on_task` | 0.997 | 0.991 | 0.945 |
 | `risk` | 0.973 | 0.957 | 0.943 |
 
+## Scanning tool results
+
+The gate asks one question about the text a tool returns: does it contain instructions addressed to an AI assistant? A result over the threshold is withheld from the agent.
+
+The measurement uses deepset's [prompt-injections](https://huggingface.co/datasets/deepset/prompt-injections) set (Apache 2.0), with its own split: 546 train texts and 116 test texts, of which 60 are labelled as injections. Each text was put to the model as a tool result.
+
+| Model | AUROC | Threshold | Precision | Recall | F1 |
+| --- | --- | --- | --- | --- | --- |
+| Jev, shipped threshold | 0.987 | 0.50 | 100.0% | 73.3% | 0.85 |
+| Jev, threshold fitted on the train split | 0.987 | 0.10 | 98.1% | 88.3% | 0.93 |
+| Gemini 3.8 Flash | 0.994 | 0.50 | 98.0% | 80.0% | 0.88 |
+| Gemma 4 31B | 0.933 | 0.50 | 100.0% | 86.7% | 0.93 |
+
+- **Precision** is the share of withheld results that were truly injections. **Recall** is the share of injections that were withheld.
+
+- **The texts are prompts typed to a chatbot, not text returned by tools.** A benign text here is an ordinary question, and an injection is often a role-play request. A web page or a file is a different kind of text, so these numbers describe the question on a neighbouring task, not the gate on real tool results.
+
+- **The lower threshold is not shipped.** It was fitted on this set, and nothing here shows how often it would withhold a legitimate web page or file.
+
 ## How good each answer is
 
 Measured on the golden test cases that reached the model. AUROC is the chance that a true case scores above a false one; 1.0 is perfect and 0.5 is a coin flip.
@@ -317,7 +336,7 @@ Times are for calls made one after another over one open connection, from the ma
 
 - **Each LLM judge ran once, at one setting.** No repeats were run for the judges, so their stability is not measured, and a higher thinking level may judge better. The judges use thresholds that were fitted to Jev's answers, not their own.
 
-- **Escalation is measured here, not yet built into the gate.** The numbers show what the gate would do if an uncertain call were put to the judge.
+- **Escalation is off in the shipped policy.** The escalation rows show what the gate does when the policy turns it on.
 
 ## Reproduce
 
