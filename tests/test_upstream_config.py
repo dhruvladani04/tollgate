@@ -130,6 +130,7 @@ def test_a_stdio_upstream_inherits_the_environment_without_tollgates_keys():
         "NODIST_PREFIX": "C:/nodist",
         "TYPESAFE_API_KEY": "jev-secret",
         "OPENROUTER_API_KEY": "router-secret",
+        "GEMINI_API_KEY": "judge-secret",
     }
 
     started_with = upstream_environment(StdioUpstream(command="npx"), environ)

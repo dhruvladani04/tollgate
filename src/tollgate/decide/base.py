@@ -69,3 +69,8 @@ class DecisionModel(Protocol):
     """The pinned model this backend asks for."""
 
     async def decide(self, request: DecisionRequest) -> Decision: ...
+
+
+# The environment variable that holds the LLM judge's API key. It is named here,
+# apart from the judge itself, so that code which only needs the name stays light.
+LLM_API_KEY_ENV = "GEMINI_API_KEY"

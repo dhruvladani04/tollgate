@@ -28,6 +28,11 @@ from evals.data import (  # noqa: E402
     load_cases,
     start_policy,
 )
+from evals.judges import (  # noqa: E402
+    escalated_bands,
+    judge_usage,
+    load_judge_run,
+)
 from evals.metrics import (  # noqa: E402
     FLAGGED,
     GateOutcome,
@@ -64,6 +69,12 @@ ECE_BINS = 15
 # The risk-coverage curve starts here; below it, too few cases give a stable rate.
 COVERAGE_FLOOR = 0.1
 NOULS = ("destructive", "exfiltration", "on_task")
+# The LLM judges in the report: display name, then Google's listed price in US dollars
+# per million input and output tokens, as read on 11 October 2026. Gemma is free of charge.
+JUDGES_REPORTED = {
+    "gemini-3.8-flash": ("Gemini 3.8 Flash", 0.75, 3.75),
+    "gemma-4-31b": ("Gemma 4 31B", 0.0, 0.0),
+}
 # Where each label sits beside its point in the trade-off figure, in points.
 TRADEOFF_LABEL_OFFSETS = {
     "Jev tuned": (-12, -18),
@@ -269,6 +280,110 @@ def plot_risk_coverage(points: list[tuple[float, float]]) -> str:
     return save(figure, "risk_coverage.png")
 
 
+def judge_section(
+    *,
+    policy,
+    thresholds: Thresholds,
+    base_label: str,
+    sets: dict[str, tuple[list[dict], list[Sample], GateOutcome]],
+    jev_tokens: float,
+    jev_median_ms: float,
+) -> tuple[list[str], dict[str, GateOutcome], dict[str, dict[str, str]]]:
+    """The report section that compares Jev with LLM judges, and the headline outcomes."""
+    jev_cost = jev_tokens * 1000 * PRICE_PER_MILLION_TOKENS / 1e6
+    outcome_tables: dict[str, list[list[str]]] = {
+        name: [outcome_row(base_label, base)] for name, (_, _, base) in sets.items()
+    }
+    speed_rows = [["Jev alone", "none", f"${jev_cost:.3f}", f"{jev_median_ms:.0f} ms", "n/a"]]
+    auroc: dict[str, dict[str, str]] = {question: {} for question in (*NOULS, "risk")}
+    for question in auroc:
+        scores, labels = column(next(iter(sets.values()))[1], question)
+        auroc[question]["Jev"] = f"{roc_auc_score(labels, scores):.3f}"
+    notes = []
+    headline: dict[str, GateOutcome] = {}
+    first_set = next(iter(sets))
+
+    for judge_key, (name, price_in, price_out) in JUDGES_REPORTED.items():
+        every_call, escalation = f"{name} on every call", f"Jev, then {name} when uncertain"
+        for set_name, (cases, jev_samples, _) in sets.items():
+            run = load_judge_run(cases, judge_key, policy)
+            escalated, sent = escalated_bands(jev_samples, run.samples, thresholds)
+            with_escalation = outcome(jev_samples, escalated)
+            on_every_call = outcome(run.samples, bands(run.samples, thresholds))
+            outcome_tables[set_name] += [
+                outcome_row(escalation, with_escalation),
+                outcome_row(every_call, on_every_call),
+            ]
+            notes.append(
+                f"{name} gave no usable answer for {run.unanswered} of {len(cases)} "
+                f"{set_name} cases."
+            )
+            if set_name != first_set:
+                continue
+            headline[escalation], headline[every_call] = with_escalation, on_every_call
+            mean_in, mean_out, median_ms, p95_ms = judge_usage(judge_key, cases)
+            judge_cost = (mean_in * price_in + mean_out * price_out) * 1000 / 1e6
+            share = sent / len(cases)
+            speed_rows += [
+                [
+                    escalation,
+                    pct(share),
+                    f"${jev_cost + share * judge_cost:.3f}",
+                    f"{jev_median_ms:.0f} ms",
+                    f"{(jev_median_ms + median_ms) / 1000:.1f} s",
+                ],
+                [
+                    every_call,
+                    "all",
+                    f"${judge_cost:.2f}",
+                    f"{median_ms / 1000:.1f} s",
+                    f"{median_ms / 1000:.1f} s (95th percentile {p95_ms / 1000:.1f} s)",
+                ],
+            ]
+            for question in auroc:
+                scores, labels = column(run.samples, question)
+                auroc[question][name] = f"{roc_auc_score(labels, scores):.3f}"
+
+    names = [name for name, _, _ in JUDGES_REPORTED.values()]
+    parts = [
+        "## Against an LLM judge",
+        f"{' and '.join(names)} were asked the same questions about the same calls, through "
+        "TypeSafe's `system-one-adapter`, which puts Jev's request shape to a general LLM. "
+        "Gemini ran with thinking set to low, the least it accepts. Every row below uses the "
+        f'thresholds of "{base_label}".',
+        "- **On every call** means the judge replaces Jev.",
+        "- **When uncertain** means Jev decides, and only a call it leaves uncertain is put to "
+        "the judge. If the judge is uncertain too, a person is still asked.",
+    ]
+    for set_name, rows in outcome_tables.items():
+        parts += [f"{set_name[0].upper()}{set_name[1:]}:", table(OUTCOME_HEADERS, rows)]
+    parts += [
+        " ".join(notes) + " Such a case is counted as held for a person.",
+        f"Speed and cost on the {first_set}:",
+        table(
+            [
+                "Configuration",
+                "Calls sent to the judge",
+                "Cost per 1,000 calls",
+                "Median time, a call Jev decides",
+                "Median time, a call the judge decides",
+            ],
+            speed_rows,
+        ),
+        "Gemma 4 is free of charge on Google's API, so its cost is a price, not what the model "
+        "costs to run. Judge times were measured with several requests in flight at once.",
+        f"How well each model separates true cases from false ones on the {first_set} (AUROC):",
+        table(
+            ["Question", "Jev", *names],
+            [
+                [f"`{question}`", auroc[question]["Jev"], *(auroc[question][n] for n in names)]
+                for question in auroc
+            ],
+        ),
+    ]
+    return parts, headline, auroc
+
+
 def stability(tuned: Thresholds) -> tuple[int, float, dict[str, tuple[float, float]], list[float]]:
     """From the timed repeats: band agreement, spread of each answer, and the call timings."""
     by_case: dict[str, list[Decision]] = defaultdict(list)
@@ -450,6 +565,22 @@ def build() -> str:
     # --- operations and stability -----------------------------------------------------
     sampled, agreement, spreads, timings = stability(tuned)
     _, start_agreement, _, _ = stability(start.thresholds)
+    tokens_with_request = [
+        decision.input_tokens
+        for case in test_cases
+        if (decision := cache.get(key_for(case, True))) is not None and decision.input_tokens
+    ]
+    judge_parts, judged, judge_auroc = judge_section(
+        policy=start,
+        thresholds=ask_tuned,
+        base_label="Jev, ask levels tuned",
+        sets={
+            "golden test split": (test_cases, test, on_test["Jev, ask levels tuned"]),
+            "InjecAgent-derived set": (external, outside, on_outside["Jev, ask levels tuned"]),
+        },
+        jev_tokens=statistics.mean(tokens_with_request),
+        jev_median_ms=percentile(timings, 0.5),
+    )
     _, ask_tuned_agreement, _, _ = stability(ask_tuned)
     largest_missed_kind, largest_missed = missed.most_common(1)[0]
     tokens = [
@@ -504,6 +635,13 @@ def build() -> str:
         f"- **With every threshold tuned**, they were {pct(fitted.recall_on_risky)} and "
         f"{pct(fitted.false_ask_rate)}. Malicious calls blocked outright, instead of put to a "
         f"person, went from {pct(jev.block_recall)} to {pct(fitted.block_recall)}.",
+        *(
+            f"- **{label}**, with the thresholds of the shipped policy: "
+            f"{pct(result.recall_on_risky)} of risky calls caught, {pct(result.false_ask_rate)} "
+            f"of benign ones held, and a person asked about {pct(result.share_held)} of calls "
+            f"(the shipped policy alone: {pct(ask_only.share_held)})."
+            for label, result in judged.items()
+        ),
         f"- **Tuned the same way with the off-task rule switched off**, the gate caught "
         f"{pct(no_rule.recall_on_risky)} of risky calls and held {pct(no_rule.false_ask_rate)} "
         "of benign ones.",
@@ -551,8 +689,8 @@ def build() -> str:
         "- **Jev, ask levels tuned.** The starting policy with only `risk_ask` and "
         "`risk_ask_off_task` fitted on the golden train split.",
         "- **Jev tuned.** The same rules with every threshold fitted on the golden train split.",
-        "Two more configurations from the build plan, escalation to an LLM judge and an LLM "
-        "judge on every call, are not built yet.",
+        "The build plan's last two configurations, escalation to an LLM judge and an LLM judge "
+        "on every call, are under [Against an LLM judge](#against-an-llm-judge).",
         "### The off-task rule",
         "The band engine holds a call whose risk score is at or above `risk_ask`. A call that "
         "is not known to serve the user's request is held from a lower level, "
@@ -625,6 +763,7 @@ def build() -> str:
             if out_of_frame
             else ""
         ),
+        *judge_parts,
         "## How good each answer is",
         "Measured on the golden test cases that reached the model. AUROC is the chance that a "
         "true case scores above a false one; 1.0 is perfect and 0.5 is a coin flip.",
@@ -729,8 +868,11 @@ def build() -> str:
         "was made on the test sets, so its test numbers are likely optimistic.",
         "- **No adversarial pressure.** No case tries to talk the model into a wrong answer "
         "from inside the tool arguments.",
-        "- **There is no LLM judge to compare with yet.** That comparison arrives with the "
-        "next milestone.",
+        "- **Each LLM judge ran once, at one setting.** No repeats were run for the judges, so "
+        "their stability is not measured, and a higher thinking level may judge better. The "
+        "judges use thresholds that were fitted to Jev's answers, not their own.",
+        "- **Escalation is measured here, not yet built into the gate.** The numbers show "
+        "what the gate would do if an uncertain call were put to the judge.",
         "## Reproduce",
         "```text\nuv run python -m evals.report\n```",
         "This rebuilds the file and its figures from `evals/cache/`, with no network access "

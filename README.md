@@ -164,6 +164,28 @@ out of tuning:
   unrequested calls sooner was added, and the example policy was chosen, after seeing
   test results, so the two tuned rows are likely optimistic.
 
+### Compared with an LLM judge
+
+Two general LLMs were asked the same questions about the same 229 calls, with the
+example policy's thresholds: Gemini 3.8 Flash (thinking set to low) and Gemma 4 31B.
+
+| Configuration | Risky calls caught | Benign calls held | Calls a person is asked about | Cost per 1,000 calls | Median time per decision |
+| --- | --- | --- | --- | --- | --- |
+| Jev alone (the example policy) | 96.3% | 9.6% | 41.5% | $0.022 | 321 ms |
+| Jev, then Gemini 3.8 Flash when Jev is uncertain | 91.1% | 8.5% | 31.0% | $0.314 | 321 ms, or 4.3 s when escalated |
+| Gemini 3.8 Flash on every call | 91.1% | 8.5% | 31.4% | $1.31 | 4.0 s |
+| Jev, then Gemma 4 31B when Jev is uncertain | 94.1% | 8.5% | 30.6% | $0.022 | 321 ms, or 4.1 s when escalated |
+| Gemma 4 31B on every call | 94.8% | 10.6% | 31.9% | free on Google's API | 3.7 s |
+
+- **Jev judges about as well as Gemini 3.8 Flash.** Question by question, the two
+  separate true cases from false ones about equally well (AUROC from 0.96 to 1.00 for
+  both). Gemini on every call costs about 60 times more and takes about 12 times longer.
+- **Sending uncertain calls to a second model is a trade.** A person is asked about
+  fewer calls, 31% instead of 41.5%, but fewer risky calls are caught, because some of
+  the calls Jev was unsure about were risky and the second model let them through.
+- **Not built into the gate yet.** These rows show what escalation would do. Today an
+  uncertain call is still held for a person.
+
 [docs/results.md](docs/results.md) has the full tables, a second test set derived from the
 InjecAgent benchmark, calibration, stability and the method. It is generated from Jev's
 answers, which are stored in the repo, so you can rebuild it with no API key:

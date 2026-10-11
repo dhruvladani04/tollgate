@@ -62,6 +62,8 @@ uv run python -m evals.report                         rebuild docs/results.md fr
 uv run python -m evals.tune                           print the fitted thresholds
 uv run --env-file .env python -m evals.run            ask Jev about cases not yet cached
 uv run python -m evals.build_golden                   rebuild the golden set from the scenes
+uv run --env-file .env python -m evals.judge gemini-3.8-flash   ask an LLM judge (paid)
+uv run --env-file .env python -m evals.judge gemma-4-31b        ask the free judge (slow)
 claude --mcp-config examples/claude_code.mcp.json --settings examples/claude_code.settings.json
 ```
 
@@ -135,6 +137,27 @@ stop the user's session to free the file.
   test on Windows before turning it back on.
 - **Observe mode blocks nothing.** A model failure or an audit failure is recorded or
   logged, and the call is still forwarded.
+
+## The LLM judge
+
+- **Same interface, same questions.** `decide/llm.py` puts a `DecisionRequest` to an LLM
+  through TypeSafe's `system-one-adapter`, so the judge has no prompt of its own.
+- **Each judge is pinned** in `JUDGES`: model id, thinking level and corrective retries.
+  The thinking level is part of the judge's name, and so of its cache key. Gemini 3.8
+  Flash rejects thinking `minimal`; `low` is the least it accepts.
+- **The key is `GEMINI_API_KEY`,** for both judges, on Google's API directly. Its name
+  lives in `decide/base.py` so `proxy/upstreams.py` can withhold it without importing
+  the Google SDK.
+- **Thinking tokens are billed as output** but reported apart, and the adapter's own
+  Gemini provider leaves them out. `_GeminiJudgeProvider` adds them, so recorded output
+  tokens match the bill.
+- **It is slow.** A Gemini 3.8 Flash answer takes about 4 seconds, five times the gate's
+  800 ms budget, so escalation in the gate needs its own time budget in the policy.
+- **Limits on the user's account (11 Oct 2026):** Gemini 3.8 Flash is on the paid Tier 1
+  key; its free tier allows about 20 requests a day. Gemma 4 31B is free at 30 requests
+  and 16,000 tokens a minute. OpenRouter's free models allow 50 requests a day on this
+  account and are not used. The user's budget for Gemini is one to two dollars; the
+  full run of 782 cases cost about one.
 
 ## The policy and the gate
 
@@ -223,6 +246,11 @@ stop the user's session to free the file.
   secrets or personal data, because `risk` scores a read as read-only; tuned block
   precision on the InjecAgent set is 62.8%; and the tuned `confidence` of 0.05 makes
   bands less stable across repeats (91.2% agreement, against 98.2% at 0.4).
+- **Judge answers are cached per judge** in `evals/cache/judge-<name>.jsonl`, with call
+  times and failures in files beside it. `evals/judges.py` computes the two judge
+  configurations from those: the judge on every call, and Jev with only its uncertain
+  calls put to the judge. The judges were asked with the user request only, once each,
+  with no stability repeats.
 - **The README's headline numbers are copied from `docs/results.md`.** Update them when
   the report changes.
 - **Figures** follow one two-colour palette on a light surface, set at the top of
@@ -343,4 +371,12 @@ Built with the off-task rule on Claude's judgment, and not explicitly confirmed:
   16.3%), and for a client that sends no user request it doubles benign holds there
   (8.2% to 16.3%). Median decision time 321 ms, p95 416 ms; about $0.022 per 1,000
   calls. Two of the plan's five configurations need the LLM judge and arrive with M5.
-- M5 and M6: not started.
+- **M5 Escalation and result scan:** first half built on 11 Oct 2026. The LLM judge
+  backend exists and the report covers all five configurations, which is M5's "Done
+  when". On the golden test split with the shipped thresholds: Jev alone caught 96.3%
+  of risky calls and asked a person about 41.5% of calls; Jev with Gemini 3.8 Flash on
+  uncertain calls, 91.1% and 31.0%; Gemini on every call, 91.1% and 31.4% at about 60
+  times the cost and 12 times the time. Gemma 4 31B answered 781 of 782 cases. Not
+  built yet: escalation inside the gate, and the scan of tool results with its data
+  (deepset/prompt-injections).
+- M6: not started.

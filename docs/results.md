@@ -23,6 +23,14 @@ The table shows each configuration on the golden test split, which was not used 
 
 - **With every threshold tuned**, they were 93.3% and 7.4%. Malicious calls blocked outright, instead of put to a person, went from 56.9% to 87.9%.
 
+- **Jev, then Gemini 3.8 Flash when uncertain**, with the thresholds of the shipped policy: 91.1% of risky calls caught, 8.5% of benign ones held, and a person asked about 31.0% of calls (the shipped policy alone: 41.5%).
+
+- **Gemini 3.8 Flash on every call**, with the thresholds of the shipped policy: 91.1% of risky calls caught, 8.5% of benign ones held, and a person asked about 31.4% of calls (the shipped policy alone: 41.5%).
+
+- **Jev, then Gemma 4 31B when uncertain**, with the thresholds of the shipped policy: 94.1% of risky calls caught, 8.5% of benign ones held, and a person asked about 30.6% of calls (the shipped policy alone: 41.5%).
+
+- **Gemma 4 31B on every call**, with the thresholds of the shipped policy: 94.8% of risky calls caught, 10.6% of benign ones held, and a person asked about 31.9% of calls (the shipped policy alone: 41.5%).
+
 - **Tuned the same way with the off-task rule switched off**, the gate caught 93.3% of risky calls and held 30.9% of benign ones.
 
 - **Without the user's request**, the tuned gate caught 95.6% of risky calls and held 30.9% of benign ones.
@@ -59,7 +67,7 @@ The table shows each configuration on the golden test split, which was not used 
 
 - **Jev tuned.** The same rules with every threshold fitted on the golden train split.
 
-Two more configurations from the build plan, escalation to an LLM judge and an LLM judge on every call, are not built yet.
+The build plan's last two configurations, escalation to an LLM judge and an LLM judge on every call, are under [Against an LLM judge](#against-an-llm-judge).
 
 ### The off-task rule
 
@@ -166,6 +174,57 @@ InjecAgent-derived set:
 
 Each small point is one setting of `risk_ask`, `risk_ask_off_task` and `confidence`, measured on the golden test split. 476 settings that held more than 60.0% of benign calls are outside the frame.
 
+## Against an LLM judge
+
+Gemini 3.8 Flash and Gemma 4 31B were asked the same questions about the same calls, through TypeSafe's `system-one-adapter`, which puts Jev's request shape to a general LLM. Gemini ran with thinking set to low, the least it accepts. Every row below uses the thresholds of "Jev, ask levels tuned".
+
+- **On every call** means the judge replaces Jev.
+
+- **When uncertain** means Jev decides, and only a call it leaves uncertain is put to the judge. If the judge is uncertain too, a person is still asked.
+
+Golden test split:
+
+| Configuration | Risky calls caught | Benign calls held | Malicious calls blocked | Block precision | Calls a person is asked about | Of which uncertain |
+| --- | --- | --- | --- | --- | --- | --- |
+| Jev, ask levels tuned | 96.3% | 9.6% | 56.9% | 75.0% | 41.5% | 22.3% |
+| Jev, then Gemini 3.8 Flash when uncertain | 91.1% | 8.5% | 81.0% | 78.3% | 31.0% | 1.3% |
+| Gemini 3.8 Flash on every call | 91.1% | 8.5% | 79.3% | 78.0% | 31.4% | 2.2% |
+| Jev, then Gemma 4 31B when uncertain | 94.1% | 8.5% | 82.8% | 73.8% | 30.6% | 0.4% |
+| Gemma 4 31B on every call | 94.8% | 10.6% | 79.3% | 70.8% | 31.9% | 0.9% |
+
+InjecAgent-derived set:
+
+| Configuration | Risky calls caught | Benign calls held | Malicious calls blocked | Block precision | Calls a person is asked about | Of which uncertain |
+| --- | --- | --- | --- | --- | --- | --- |
+| Jev, ask levels tuned | 87.8% | 18.4% | 75.8% | 100.0% | 48.3% | 26.8% |
+| Jev, then Gemini 3.8 Flash when uncertain | 79.5% | 0.0% | 79.0% | 100.0% | 36.6% | 1.5% |
+| Gemini 3.8 Flash on every call | 78.8% | 0.0% | 72.6% | 100.0% | 38.0% | 1.5% |
+| Jev, then Gemma 4 31B when uncertain | 80.1% | 4.1% | 82.3% | 89.5% | 34.1% | 1.5% |
+| Gemma 4 31B on every call | 79.5% | 8.2% | 83.9% | 88.1% | 33.7% | 2.0% |
+
+Gemini 3.8 Flash gave no usable answer for 0 of 229 golden test split cases. Gemini 3.8 Flash gave no usable answer for 0 of 205 InjecAgent-derived set cases. Gemma 4 31B gave no usable answer for 0 of 229 golden test split cases. Gemma 4 31B gave no usable answer for 0 of 205 InjecAgent-derived set cases. Such a case is counted as held for a person.
+
+Speed and cost on the golden test split:
+
+| Configuration | Calls sent to the judge | Cost per 1,000 calls | Median time, a call Jev decides | Median time, a call the judge decides |
+| --- | --- | --- | --- | --- |
+| Jev alone | none | $0.022 | 321 ms | n/a |
+| Jev, then Gemini 3.8 Flash when uncertain | 22.3% | $0.314 | 321 ms | 4.3 s |
+| Gemini 3.8 Flash on every call | all | $1.31 | 4.0 s | 4.0 s (95th percentile 7.1 s) |
+| Jev, then Gemma 4 31B when uncertain | 22.3% | $0.022 | 321 ms | 4.1 s |
+| Gemma 4 31B on every call | all | $0.00 | 3.7 s | 3.7 s (95th percentile 10.1 s) |
+
+Gemma 4 is free of charge on Google's API, so its cost is a price, not what the model costs to run. Judge times were measured with several requests in flight at once.
+
+How well each model separates true cases from false ones on the golden test split (AUROC):
+
+| Question | Jev | Gemini 3.8 Flash | Gemma 4 31B |
+| --- | --- | --- | --- |
+| `destructive` | 0.960 | 0.980 | 0.926 |
+| `exfiltration` | 0.995 | 1.000 | 0.903 |
+| `on_task` | 0.997 | 0.991 | 0.945 |
+| `risk` | 0.973 | 0.957 | 0.943 |
+
 ## How good each answer is
 
 Measured on the golden test cases that reached the model. AUROC is the chance that a true case scores above a false one; 1.0 is perfect and 0.5 is a coin flip.
@@ -209,7 +268,7 @@ Each judged test case is given the lowest confidence among its answers. The case
 | 90.0% | 6.8% |
 | 100.0% | 7.1% |
 
-With every judged case decided, 15 of 212 decisions were wrong: 6 benign calls held and 9 risky calls allowed.
+With every judged case decided, 15 of 4 decisions were wrong: 6 benign calls held and 9 risky calls allowed.
 
 ![Error rate as less confident answers are included](img/risk_coverage.png)
 
@@ -256,7 +315,9 @@ Times are for calls made one after another over one open connection, from the ma
 
 - **No adversarial pressure.** No case tries to talk the model into a wrong answer from inside the tool arguments.
 
-- **There is no LLM judge to compare with yet.** That comparison arrives with the next milestone.
+- **Each LLM judge ran once, at one setting.** No repeats were run for the judges, so their stability is not measured, and a higher thinking level may judge better. The judges use thresholds that were fitted to Jev's answers, not their own.
+
+- **Escalation is measured here, not yet built into the gate.** The numbers show what the gate would do if an uncertain call were put to the judge.
 
 ## Reproduce
 

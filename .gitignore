@@ -26,3 +26,6 @@ evals/data/external/downloads/
 # Local planning files kept out of the repo
 /Tollgate a Jev-gated MCP proxy (build plan).md
 /jev_in_agent_loop.svg
+
+# Local tool state
+.serena/
