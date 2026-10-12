@@ -1,10 +1,21 @@
 [project]
-name = "tollgate"
+name = "tollgate-mcp"
 version = "0.1.0"
 description = "MCP proxy that gates tool calls and scans tool results with TypeSafe's Jev model"
 readme = "README.md"
 authors = [
     { name = "Dhruv Ladani", email = "dhruvladanicode04@gmail.com" }
+]
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["mcp", "agents", "guardrails", "tool-calls", "prompt-injection", "jev"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries",
 ]
 requires-python = ">=3.12"
 dependencies = [
@@ -18,11 +29,17 @@ dependencies = [
     "uvicorn>=0.54.0",
 ]
 
+[project.urls]
+Repository = "https://github.com/dhruvladani04/tollgate"
+Issues = "https://github.com/dhruvladani04/tollgate/issues"
+Results = "https://github.com/dhruvladani04/tollgate/blob/main/docs/results.md"
+
 [project.scripts]
 tollgate = "tollgate.proxy.server:main"
 tollgate-approve = "tollgate.approve.cli:main"
 tollgate-hook = "tollgate.prompts:main"
 tollgate-dashboard = "tollgate.dashboard.app:main"
+tollgate-init = "tollgate.init:main"
 
 [build-system]
 requires = ["uv_build>=0.11.28,<0.12.0"]
@@ -55,3 +72,8 @@ select = ["E", "F", "I", "UP", "B"]
 # These files are tables of test data; their long strings are kept on one line.
 "evals/scenes/*.py" = ["E501"]
 "evals/injecagent.py" = ["E501"]
+
+[tool.uv.build-backend]
+# The package installs as `tollgate-mcp`, because `tollgate` is taken on PyPI, and
+# is still imported as `tollgate`.
+module-name = "tollgate"

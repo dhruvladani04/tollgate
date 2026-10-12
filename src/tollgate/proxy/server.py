@@ -101,7 +101,7 @@ def build_server(source: ToolSource) -> Server[Any]:
 
     return Server(
         "tollgate",
-        version=version("tollgate"),
+        version=version("tollgate-mcp"),
         on_list_tools=list_tools,
         on_call_tool=call_tool,
     )

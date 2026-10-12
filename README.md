@@ -71,6 +71,32 @@ To rebuild every number in this README from the stored model answers, with no ke
 uv run python -m evals.report
 ```
 
+## Use it in your own project
+
+The package is named `tollgate-mcp`, because `tollgate` on PyPI belongs to an unrelated
+project. It is not published to PyPI yet, so install it from this repository:
+
+```text
+uv tool install git+https://github.com/dhruvladani04/tollgate.git
+```
+
+Then, in the folder your agent works in:
+
+```text
+tollgate-init
+```
+
+This writes two files to edit: `policy.yaml`, a commented copy of the example policy, and
+`upstreams.json`, which names one filesystem server. Both are limited to the folder you
+run Tollgate from. Set `TYPESAFE_API_KEY`, then start the proxy and the dashboard:
+
+```text
+tollgate --upstreams upstreams.json --policy policy.yaml
+tollgate-dashboard --policy policy.yaml
+```
+
+Point your MCP client at the first command, as it would at any stdio MCP server.
+
 ## Set up
 
 Tollgate needs [uv](https://docs.astral.sh/uv/). uv installs Python 3.12 for you.
@@ -471,3 +497,10 @@ request and the two before it as recent context. Things to know:
 On Windows with Node.js installed, the reference fetch server can hang while it converts a
 page to Markdown. This happens without Tollgate too. Pass `"raw": true` to the `fetch` tool
 to skip the conversion.
+
+## Contributing and licence
+
+Bug reports, questions and pull requests are welcome; [CONTRIBUTING.md](CONTRIBUTING.md) has
+the set-up, the checks to run and the rules the code keeps. Tollgate is released under the
+[MIT licence](LICENSE). The InjecAgent-derived test data carries its own notice in
+[evals/data/external/NOTICE.md](evals/data/external/NOTICE.md).

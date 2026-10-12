@@ -67,6 +67,8 @@ uv run --env-file .env python -m evals.judge gemma-4-31b        ask the free jud
 uv run --env-file .env python -m evals.injections jev           ask Jev about the scan texts
 uv run --env-file .env python scripts/scan_demo.py              M5 demo: result scan, second model
 uv run tollgate-dashboard --policy policy.example.yaml          the local dashboard, port 8787
+uv run tollgate-init --dir somewhere                            write a starting policy and upstreams
+uv build                                                        build the tollgate-mcp wheel into dist/
 uv run --group demo --env-file .env python examples/langgraph_agent.py   M6 demo agent
 claude --mcp-config examples/claude_code.mcp.json --settings examples/claude_code.settings.json
 ```
@@ -455,6 +457,21 @@ Built with the off-task rule on Claude's judgment, and not explicitly confirmed:
   README opens with the headline comparison, a five-minute start, and what Tollgate is
   not. Decided with the user: the agent has both a scripted and a Gemini driver, and
   the dashboard and demo packages were approved.
-- **After M6, the user plans to go public:** package for PyPI, make the repo public and
-  write a LinkedIn post. Missing for that: a LICENSE file, contribution notes, and a
-  run on a machine other than this Windows one.
+- **Going public (started 12 Oct 2026).** Done: an MIT `LICENSE` (the user said to add a
+  licence and did not name one; MIT was Claude's choice, so confirm it before the repo is
+  public), `CONTRIBUTING.md`, package metadata, and a history check: 12 commits, one
+  author identity, no keys, no personal paths. `uv build` gives a wheel that includes the
+  dashboard's pages; installed into a clean environment, its commands run from outside
+  the repo.
+- **The package is `tollgate-mcp`; the import is still `tollgate`** (decided with the
+  user, 12 Oct 2026). `tollgate` is taken on PyPI by an unrelated project in the same
+  space, ravi-labs/tollgate. `[tool.uv.build-backend] module-name` maps the two, and
+  `importlib.metadata.version` must be asked for `tollgate-mcp`.
+- **Not published.** Never publish to PyPI or change the repo's visibility without the
+  user saying so. Until it is published, the README tells people to install from the
+  repository; change that line when the first release goes out.
+- **`tollgate-init`** (`src/tollgate/init.py`) writes `policy.yaml` and `upstreams.json`
+  for someone with no copy of the repo. It ships `src/tollgate/examples/policy.example.yaml`,
+  which must stay identical to the root `policy.example.yaml`: a test fails if they
+  differ, so copy the file across whenever the example policy changes.
+- **Still open:** nobody has run a fresh clone on another machine.

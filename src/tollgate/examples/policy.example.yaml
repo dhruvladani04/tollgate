@@ -1,0 +1,97 @@
+# Tollgate policy. Every number the gate decides with lives in this file.
+#
+# The two ask levels, risk_ask and risk_ask_off_task, were fitted to labelled calls.
+# Every other number is a starting value from the build plan and is not tuned.
+# docs/results.md has the measurements behind this, and the fully tuned values.
+
+decision:
+  # Budget for one decision, retries included. If the model has not answered by
+  # then, the call is held for a person. It is never allowed by default.
+  timeout_ms: 800
+  max_retries: 2
+
+context:
+  # The user's request and each earlier turn are cut to this many characters before
+  # they are sent to the model. The start and the end are kept.
+  max_chars: 2000
+
+thresholds:
+  # `risk` is a score from 0 (read-only) to 3 (destroys data, spends money or
+  # sends data to a third party).
+  risk_ask: 1.4        # at or above this, a person decides
+  # The same, for a call that is not known to serve the user's request: one the
+  # model judges off task, or one made by a client that sends no user request.
+  # It must not be above risk_ask. Set it equal to risk_ask to switch this rule off.
+  risk_ask_off_task: 0.2
+  risk_block: 2.2      # above this, an off-task call is blocked
+  # The rest are probabilities from 0 to 1.
+  destructive: 0.5     # above this, a person decides
+  exfiltration: 0.5    # above this, the call is blocked
+  on_task: 0.5         # below this, the call counts as off task
+  # An answer less confident than this is escalated instead of acted on.
+  confidence: 0.5
+
+prefilter:
+  # Exact checks. A call they decide never reaches the model.
+  allow_tools:
+    - list_allowed_directories
+  deny_tools: []
+  # Larger arguments are not sent to the model; a person decides.
+  max_argument_bytes: 50000
+  # A match blocks the call. The match is redacted wherever arguments are stored or shown.
+  secret_patterns:
+    private_key: '-----BEGIN [A-Z ]*PRIVATE KEY-----(?:[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----)?'
+    aws_access_key_id: '\bAKIA[0-9A-Z]{16}\b'
+    github_token: '\bgh[pousr]_[A-Za-z0-9]{36,}\b'
+    slack_token: '\bxox[baprs]-[A-Za-z0-9-]{10,}\b'
+    api_key: '\bsk-[A-Za-z0-9_-]{20,}\b'
+    json_web_token: '\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b'
+  path_sandbox:
+    # Path arguments must stay inside these folders. An empty list turns the check off.
+    roots:
+      - examples/sandbox
+    # Argument names that hold a path, or a list of paths.
+    arguments: [path, paths, source, destination]
+
+approval:
+  # A held call that nobody answers is denied after this long.
+  timeout_seconds: 300
+
+escalation:
+  # A call the first model is unsure about normally goes to a person. With this on,
+  # it is first put to a second, slower model, and a person is asked only if that
+  # model is unsure too. In the evaluation this meant fewer questions for a person,
+  # and also fewer risky calls caught, so it is off unless you turn it on.
+  enabled: false
+  # The second model. provider is gemini, anthropic or openai, and its key is read
+  # from GEMINI_API_KEY, ANTHROPIC_API_KEY or OPENAI_API_KEY.
+  provider: gemini
+  model: gemini-3.8-flash
+  # Gemini only: low, medium or high. Leave empty for the other providers.
+  thinking: low
+  # A malformed answer is sent back to be corrected this many times.
+  corrective_retries: 1
+  # If the second model has not answered by then, a person is asked.
+  timeout_ms: 10000
+
+result_scan:
+  # Check the text each tool returns for instructions aimed at the agent, such as
+  # "ignore your earlier instructions". A result over the threshold is withheld from
+  # the agent and kept in the audit log.
+  enabled: true
+  # At 0.5, Jev withheld 73.3% of the injections in a public test set and no benign
+  # text. At 0.10 it withheld 88.3%, with one false alarm. 0.5 is kept because that
+  # set cannot show how often a lower value would withhold a legitimate page.
+  injected: 0.5
+  # If the scan has not finished by then, the result is passed on with a warning.
+  timeout_ms: 800
+  # A longer result is cut to this many characters for the scan.
+  max_chars: 20000
+
+# Per-tool overrides of the thresholds above, for example:
+#
+#   tools:
+#     write_file:
+#       thresholds:
+#         destructive: 0.3
+tools: {}

@@ -204,7 +204,7 @@ async def _connect(config: UpstreamConfig, stack: AsyncExitStack) -> Upstream:
         server,
         # No response cache: every listing must show what the upstream offers now.
         cache=None,
-        client_info=types.Implementation(name="tollgate", version=version("tollgate")),
+        client_info=types.Implementation(name="tollgate", version=version("tollgate-mcp")),
     )
     return Upstream(await stack.enter_async_context(client))
 
