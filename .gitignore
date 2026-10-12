@@ -29,3 +29,11 @@ evals/data/external/downloads/
 
 # Local tool state
 .serena/
+
+# The dashboard app: installed packages and build output. The built pages that
+# tollgate-dashboard serves are committed, in src/tollgate/dashboard/static.
+dashboard/node_modules/
+dashboard/.next/
+dashboard/out/
+dashboard/next-env.d.ts
+dashboard/*.tsbuildinfo

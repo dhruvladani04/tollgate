@@ -5,16 +5,71 @@ coming back, with [Jev](https://docs.typesafe.ai/) before letting it through. It
 between an MCP client (Claude Code, Cursor, a LangGraph agent) and the upstream MCP servers.
 Each call ends one of three ways: allow, ask a human, or block.
 
-**Status: early build.** Tollgate gates tool calls: it allows them, holds them for a person,
-or blocks them. The gate has been measured on labelled calls; see
-[How well it works](#how-well-it-works). In the example policy, the two risk levels for
-asking are fitted to those calls and every other threshold is the build plan's starting
-value. Tollgate also scans what tools return for instructions aimed at the agent, and can
-put calls it is unsure about to a second model of your choice. A dashboard is still to
-come; see the milestones in [docs/spec.md](docs/spec.md).
+It was built to answer one question with measurements: can a small, fast judgment model
+gate an agent's tool calls as well as a general LLM, for much less? On 229 labelled calls
+held back from tuning:
 
-Tollgate is not a security guarantee. Jev's vendor says adversarial content can move its
-answers, so Tollgate is one layer of defense, not the only one.
+| | Jev (Tollgate's default) | Gemini 3.8 Flash on every call |
+| --- | --- | --- |
+| Risky calls caught | 96.3% | 91.1% |
+| Benign calls held | 9.6% | 8.5% |
+| Calls a person is asked about | 41.5% | 31.4% |
+| Median time per decision | 321 ms | 4.0 s |
+| Cost per 1,000 calls | $0.022 | $1.31 |
+
+Jev is about as good a judge, 12 times faster and 60 times cheaper, but it is unsure more
+often, so a person is asked more. Both columns use thresholds fitted to Jev.
+[How well it works](#how-well-it-works) has the rest, including what did not work.
+
+**What it does**
+
+- **Gates each tool call:** allowed, held for a person, or blocked, with the reason.
+- **Scans what tools return** for instructions aimed at the agent, and withholds a result
+  that carries them.
+- **Records every decision** in a local audit log, with a dashboard to read it and to
+  answer held calls.
+- **Fails closed:** if the model is slow or down, a person is asked. Nothing runs by
+  default.
+
+**What it is not**
+
+- **Not a security guarantee.** Jev's vendor says adversarial content can move its
+  answers, and nothing here was tested against an attacker who is trying to. Treat
+  Tollgate as one layer of defense.
+- **Not low-friction yet.** With the example policy a person is asked about roughly four
+  calls in ten, half of them because the model was unsure.
+- **Not proven on real traffic.** The test calls were written for this project. See
+  [Limits](#limits).
+
+The whole project was built with Claude Code, one milestone at a time, from the plan in
+[docs/spec.md](docs/spec.md).
+
+## Try it in five minutes
+
+You need [uv](https://docs.astral.sh/uv/), [Node.js](https://nodejs.org/) for the example
+filesystem server, and a Jev API key.
+
+```text
+git clone https://github.com/dhruvladani04/tollgate.git
+cd tollgate
+uv sync
+```
+
+Put your key in a file named `.env` in that folder, as `TYPESAFE_API_KEY=...`. Then:
+
+```text
+uv run --env-file .env python scripts/enforce_demo.py
+uv run tollgate-dashboard --state-dir .tollgate/demo --policy policy.example.yaml
+```
+
+The first command runs six tool calls through Tollgate and prints what happened to each.
+The second opens the same record as a web page at http://127.0.0.1:8787.
+
+To rebuild every number in this README from the stored model answers, with no key:
+
+```text
+uv run python -m evals.report
+```
 
 ## Set up
 
@@ -48,13 +103,36 @@ uv run --env-file .env python scripts/smoke_jev.py
 
 ## See it work
 
-The demo starts Tollgate in front of two real MCP servers and plays both the client and the
-person approving. It shows a call allowed, two blocked, one held until approved, one held
-and denied, and one held because the model was given no time to answer:
+Three demos, each printing what Tollgate did and why. All of them need the Jev key.
+
+| Command | What it shows |
+| --- | --- |
+| `uv run --env-file .env python scripts/enforce_demo.py` | Tollgate in front of two real MCP servers: a call allowed, two blocked by exact checks, one held and approved, one held and denied, and one held because the model was given no time to answer. |
+| `uv run --env-file .env python scripts/scan_demo.py` | The result scan withholding a page that carries instructions for the agent, and a second model asked about an uncertain call. Also needs `GEMINI_API_KEY`. |
+| `uv run --group demo --env-file .env python examples/langgraph_agent.py` | A LangGraph agent working through Tollgate. See the next section. |
+
+## Use Tollgate from a LangGraph agent
+
+[examples/langgraph_agent.py](examples/langgraph_agent.py) is a two-node LangGraph agent:
+a model node picks the next tool calls and a tool node makes them through Tollgate. The
+agent is asked to read a file and write a summary of it.
 
 ```text
-uv run --env-file .env python scripts/enforce_demo.py
+uv run --group demo --env-file .env python examples/langgraph_agent.py
+uv run --group demo --env-file .env python examples/langgraph_agent.py --model gemini
 ```
+
+- **By default the model node replays a fixed script.** It is free and gives the same run
+  every time. The script ends with two calls nobody asked for, as if a web page had talked
+  the agent into them: reading a file outside the sandbox, which Tollgate blocks, and
+  overwriting the file it was only asked to read, which Tollgate holds.
+- **With `--model gemini`, Gemini 3.8 Flash picks the calls.** It needs `GEMINI_API_KEY`,
+  costs a few cents and varies from run to run.
+- **`--held wait`** leaves held calls for you to answer in the dashboard.
+
+The agent passes the user's request with every call, in the call's `_meta`, because MCP
+itself does not carry it. [Tell Tollgate what the user asked for](#tell-tollgate-what-the-user-asked-for)
+explains why that matters.
 
 ## Run the proxy
 
@@ -289,6 +367,44 @@ uv run python -m tollgate.audit
 Identical requests are answered from a cache in `.tollgate/jev-cache.jsonl`, so a repeated
 call costs nothing and takes no time.
 
+## The dashboard
+
+```text
+uv run tollgate-dashboard --policy policy.example.yaml
+```
+
+This serves a local web app at http://127.0.0.1:8787 with three views:
+
+![The Decisions page: each judged call with its outcome, reason and scores](docs/img/dashboard-decisions.png)
+
+| Page | What it shows |
+| --- | --- |
+| Decisions | Every call Tollgate judged, newest first: what happened, why, the model's answers and the time the decision took. |
+| Waiting for you | The calls being held, each with Approve and Deny buttons. It is the same queue `tollgate-approve` answers. |
+| Thresholds | The numbers in your policy, beside how many recent calls crossed each one and the nearest call that did not. |
+
+- **It reads Tollgate's files,** so it works whether or not the proxy is running. Point
+  `--state-dir` at the folder the proxy writes to; the default is `.tollgate`.
+- **It has no login.** It listens on your own machine only. Anyone who can reach the
+  address can approve calls, so do not change `--host` on a shared network.
+- **Its buttons cannot be pressed by another web page.** An answer to a held call must
+  carry a token that only the dashboard's own pages can read.
+- **It follows your system's light or dark setting.**
+
+![The Waiting for you page: two held calls with Approve and Deny buttons](docs/img/dashboard-approvals.png)
+
+![The Thresholds page: each policy number beside how recent calls scored](docs/img/dashboard-thresholds.png)
+
+The pages are a Next.js app in [dashboard/](dashboard/), built to static files that ship
+inside the Python package, so running the dashboard needs no Node. To change the pages:
+
+```text
+cd dashboard
+npm install
+npm run dev      # live pages on port 3000, using the API from tollgate-dashboard
+npm run build    # rebuild the static files that tollgate-dashboard serves
+```
+
 ## Tell Tollgate what the user asked for
 
 MCP sends a server the tool name and the arguments, and nothing about the conversation.
@@ -331,6 +447,24 @@ request and the two before it as recent context. Things to know:
 - **Transports.** Upstreams can be stdio commands or streamable HTTP URLs. Tollgate itself
   serves stdio.
 - **Tools only.** Resources, prompts and upstream notifications are not forwarded yet.
+
+## Limits
+
+- **The main test set was written by an AI and labelled by fixed rules.** It may be easier
+  than real traffic. On the one outside set, derived from the InjecAgent benchmark, the
+  example policy did no better than the untuned starting thresholds.
+- **Nothing was tested against an attacker.** No case tries to talk the model into a
+  wrong answer from inside a tool call or a tool result.
+- **A person is still asked often.** About 41% of test calls, with the example policy.
+- **Two design choices were made after seeing test results:** the rule that holds
+  unrequested calls sooner, and which thresholds ship. Those numbers are likely optimistic.
+- **The result scan was measured on chatbot prompts,** not on real tool output.
+- **It only sees MCP tool calls.** A client's built-in tools, such as Claude Code's shell,
+  never pass through it.
+- **It depends on one model from one vendor,** pinned to Jev 1.13.0.
+- **It has been run on one Windows machine.**
+
+[docs/results.md](docs/results.md) states the limits of each measurement beside it.
 
 ### Known issue with the fetch server on Windows
 

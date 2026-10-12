@@ -66,6 +66,8 @@ uv run --env-file .env python -m evals.judge gemini-3.8-flash   ask an LLM judge
 uv run --env-file .env python -m evals.judge gemma-4-31b        ask the free judge (slow)
 uv run --env-file .env python -m evals.injections jev           ask Jev about the scan texts
 uv run --env-file .env python scripts/scan_demo.py              M5 demo: result scan, second model
+uv run tollgate-dashboard --policy policy.example.yaml          the local dashboard, port 8787
+uv run --group demo --env-file .env python examples/langgraph_agent.py   M6 demo agent
 claude --mcp-config examples/claude_code.mcp.json --settings examples/claude_code.settings.json
 ```
 
@@ -227,6 +229,44 @@ stop the user's session to free the file.
   the reason.
 - **A cached decision survives an outage:** the cache answers before the model is asked.
 
+## The dashboard and the demo agent
+
+- **Two parts.** `src/tollgate/dashboard/app.py` is a FastAPI JSON API under `/api`. The
+  pages are a Next.js app (React, TypeScript, Tailwind) in the repo's `dashboard/`
+  folder. The user rejected server-rendered HTML templates as unprofessional (12 Oct
+  2026), so do not go back to them.
+- **The pages are a static export, and the build is committed.** `npm run build` in
+  `dashboard/` exports to `out/` and copies it to `src/tollgate/dashboard/static/`,
+  which `tollgate-dashboard` serves beside the API. Running needs no Node. After any
+  change under `dashboard/`, run the build and commit `static/` with it.
+- **Read `dashboard/AGENTS.md` first.** This Next.js version (16) differs from older
+  ones and ships its own docs under `dashboard/node_modules/next/dist/docs/`.
+- **In development,** `npm run dev` serves the pages on port 3000 and rewrites `/api` to
+  `tollgate-dashboard` on 8787. Rewrites do not exist in a static export, so the config
+  only sets `output: export` outside development.
+- **The API reads files, not the proxy.** It opens the audit log and the approval queue
+  per request and closes them again, so it works with the proxy stopped and never
+  holds a lock.
+- **It can approve calls, so it guards them.** Answering a held call needs the token
+  from `/api/session` in an `X-Tollgate-Token` header. Another site can make the
+  browser send a request to localhost, but cannot read that token or add the header.
+  Keep the check, keep answering a POST and never a GET, and never add CORS headers.
+- **It listens on 127.0.0.1 and has no login.** Changing `--host` exposes the approve
+  buttons to whoever can reach it.
+- **Tool arguments, user requests and withheld results are attacker-controlled text.**
+  The pages render them through React as text. Never use `dangerouslySetInnerHTML`.
+- **Look at it before calling it done.** Headless Chrome can screenshot a running
+  dashboard: `chrome --headless=new --window-size=1360,900 --virtual-time-budget=8000
+  --screenshot=out.png http://127.0.0.1:8787/`. The README's three screenshots in
+  `docs/img/dashboard-*.png` were taken this way, in light mode.
+- **`langchain-mcp-adapters` cannot be used.** It requires version 1 of the `mcp` SDK and
+  installing it downgrades the SDK Tollgate is built on. The demo agent wraps the MCP
+  client by hand instead. After any `uv pip install`, check `mcp` is still 2.x.
+- **The demo agent** (`examples/langgraph_agent.py`) has a scripted model node by default
+  and Gemini with `--model gemini`. Its packages are in the optional `demo` group, so
+  its tests skip when they are not installed. It restores the sandbox file byte for
+  byte, because a text-mode rewrite changes line endings on Windows.
+
 ## The evaluation
 
 - **Scenes, not cases, are the source.** `evals/scenes/*.py` holds 330 hand-written
@@ -284,10 +324,11 @@ src/tollgate/
   policy/             YAML schema, pre-filter, band engine (M3)
   approve/            approval queue and CLI (M3)
   audit/              SQLite audit log (M2)
-  dashboard/          FastAPI dashboard (M6)
+  dashboard/          the dashboard's JSON API and its built pages (M6)
   context.py          call context types; import-light for the hook
   prompts.py          the Claude Code hook command and its prompt log
 docs/results.md       the evaluation report, generated; do not edit by hand
+dashboard/            the dashboard's pages: a Next.js app, built into the package
 evals/
   scenes/             the hand-written scenes, one file per tool family
   golden.py           labelling rules and the train/test split
@@ -406,4 +447,14 @@ Built with the off-task rule on Claude's judgment, and not explicitly confirmed:
   73.3% and 100% at 0.5), but those are chatbot prompts, and nothing measures how often
   0.10 would withhold a real page. `docs/decisions/0002-result-scan-threshold.md` has
   the record. Measuring the scan on real tool output is what would justify a change.
-- M6: not started.
+- **M6 Dashboard and write-up:** built on 12 Oct 2026. The dashboard is a Next.js app
+  over a FastAPI JSON API, with the three views the plan names; it was checked in a
+  browser, in light and dark, against the demos' real audit log. The LangGraph agent
+  ran through Tollgate in both modes: scripted, where the out-of-sandbox read was
+  blocked and the unrequested overwrite held; and with Gemini choosing the calls. The
+  README opens with the headline comparison, a five-minute start, and what Tollgate is
+  not. Decided with the user: the agent has both a scripted and a Gemini driver, and
+  the dashboard and demo packages were approved.
+- **After M6, the user plans to go public:** package for PyPI, make the repo public and
+  write a LinkedIn post. Missing for that: a LICENSE file, contribution notes, and a
+  run on a machine other than this Windows one.
