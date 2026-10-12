@@ -1,0 +1,4 @@
+# Generated and data files keep Unix line endings on every system, so that
+# regenerating them on Windows does not show up as a change.
+docs/results.md text eol=lf
+*.jsonl text eol=lf

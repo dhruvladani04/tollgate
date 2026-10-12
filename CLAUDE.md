@@ -474,4 +474,11 @@ Built with the off-task rule on Claude's judgment, and not explicitly confirmed:
   for someone with no copy of the repo. It ships `src/tollgate/examples/policy.example.yaml`,
   which must stay identical to the root `policy.example.yaml`: a test fails if they
   differ, so copy the file across whenever the example policy changes.
-- **Still open:** nobody has run a fresh clone on another machine.
+- **Public since 12 Oct 2026,** under MIT, which the user confirmed.
+- **A fresh clone was checked on this machine (12 Oct 2026):** `uv sync` and the tests
+  passed (395, with the demo agent's tests skipped because its packages are optional),
+  `evals.report` reproduced the report, and installing straight from GitHub gave working
+  commands and dashboard pages. It has still not been run on macOS or Linux.
+- **`.gitattributes` keeps `docs/results.md` and `*.jsonl` on Unix line endings.** Without
+  it, regenerating the report on Windows showed the file as changed when only its line
+  endings differed.
